@@ -5,6 +5,25 @@ This fork of [Technitium DNS Server](https://github.com/TechnitiumSoftware/DnsSe
 - redundant DHCP. See [DHCP-FAILOVER.md](DHCP-FAILOVER.md).
 - cluster improvements, including 2-node auto failover. See [CLUSTER-IMPROVEMENTS.md](CLUSTER-IMPROVEMENTS.md).
 
+## How the branches fit together
+
+The features are developed as separate upstream pull requests. This fork's build combines them.
+
+| Branch | Based on | Contains | Purpose |
+|---|---|---|---|
+| `upstream/dhcp-failover` | `TechnitiumSoftware/develop` | DHCP failover only | Pull request to upstream |
+| `upstream/cluster-improvements` | `TechnitiumSoftware/develop` | Cluster improvements only | Pull request to upstream |
+| `fork/main` | latest upstream release (`master`) | both features, plus fork-only additions | What CI builds and the installer ships |
+
+The two upstream branches don't depend on each other and merge cleanly in either order. `fork/main` carries the same feature commits, cherry-picked onto the release. Its fork-only additions are:
+
+- CI;
+- the installer and release publishing;
+- fork version numbers and the update feed;
+- the DHCP failover state shown in the Cluster node table, which needs both features.
+
+To change a feature, commit to its `upstream/*` branch and cherry-pick the commit onto `fork/main`.
+
 ## Install or update (Linux, systemd or OpenRC)
 
 ```
@@ -38,7 +57,7 @@ The web console's **check for update** reads `update.json` from the `fork-latest
 ## Docker
 
 ```
-docker pull ghcr.io/optimusprime-nn/dnsserver:feature-dhcp-failover
+docker pull ghcr.io/optimusprime-nn/dnsserver:fork-main
 ```
 
 Images are built for amd64 and arm64 (Raspberry Pi 4/5). They are tagged with:
@@ -49,7 +68,7 @@ Images are built for amd64 and arm64 (Raspberry Pi 4/5). They are tagged with:
 
 ## Builds
 
-GitHub Actions builds every push on the org's self-hosted runners; see `.github/workflows/build.yml`. Each push to `feature/dhcp-failover` replaces the [`fork-latest`](https://github.com/optimusprime-nn/DnsServer/releases/tag/fork-latest) pre-release with:
+GitHub Actions builds every push on the org's self-hosted runners; see `.github/workflows/build.yml`. Each push to `fork/main` replaces the [`fork-latest`](https://github.com/optimusprime-nn/DnsServer/releases/tag/fork-latest) pre-release with:
 
 - `DnsServerPortable.tar.gz`
 - `install.sh`

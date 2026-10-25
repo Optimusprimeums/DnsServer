@@ -175,6 +175,13 @@ function reloadAdminClusterView(responseJSON) {
                 nodeType += "<br /><span class=\"label label-warning\" style=\"display: inline-block; margin-top: 4px;\" title=\"Auto failover is paused on this node for planned maintenance.\">Failover Paused until " + pausedUntil.local().format("HH:mm") + "</span>";
             }
 
+            if (responseJSON.response.clusterNodes[i].dhcpFailoverRole != null) {
+                var dhcpFailoverState = responseJSON.response.clusterNodes[i].dhcpFailoverState;
+                var dhcpFailoverLabelClass = (dhcpFailoverState === "Normal") ? "info" : "warning";
+
+                nodeType += "<br /><span class=\"label label-" + dhcpFailoverLabelClass + "\" style=\"display: inline-block; margin-top: 4px;\" title=\"DHCP failover state: " + htmlEncode(dhcpFailoverState) + "\">DHCP " + htmlEncode(responseJSON.response.clusterNodes[i].dhcpFailoverRole) + ": " + htmlEncode(dhcpFailoverState) + "</span>";
+            }
+
             var clusterNodestate;
 
             switch (responseJSON.response.clusterNodes[i].state) {

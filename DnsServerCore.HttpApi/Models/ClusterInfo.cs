@@ -51,6 +51,8 @@ namespace DnsServerCore.HttpApi.Models
             public DateTime? UpSince { get; set; }
             public DateTime? LastSeen { get; set; }
             public DateTime? ConfigLastSynced { get; set; }
+            public string? DhcpFailoverRole { get; set; }
+            public string? DhcpFailoverState { get; set; }
             public int? AutoFailoverPauseRemainingSeconds { get; set; }
         }
     }

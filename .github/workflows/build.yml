@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [master, "feature/**"]
+    branches: [master, "fork/**", "feature/**"]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -199,7 +199,7 @@ jobs:
   release:
     needs: build
     # change the branch here (e.g. to master) once the fork's work is merged there
-    if: github.event_name == 'push' && github.ref_name == 'feature/dhcp-failover'
+    if: github.event_name == 'push' && github.ref_name == 'fork/main'
     runs-on: [self-hosted, Linux, X64, big]
     timeout-minutes: 15
     permissions:

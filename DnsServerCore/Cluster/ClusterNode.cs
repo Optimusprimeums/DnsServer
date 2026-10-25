@@ -65,6 +65,8 @@ namespace DnsServerCore.Cluster
         DateTime _upSince;
         DateTime _lastSeen;
         DateTime _configLastSynced;
+        string _dhcpFailoverRole;
+        string _dhcpFailoverState;
         DateTime _autoFailoverPausedUntil;
         HttpApiClient _apiClient;
 
@@ -242,6 +244,8 @@ namespace DnsServerCore.Cluster
                         _version = clusterNodeInfo.Version;
                         _upSince = clusterNodeInfo.UpSince ?? default;
                         _configLastSynced = clusterNodeInfo.ConfigLastSynced ?? default;
+                        _dhcpFailoverRole = clusterNodeInfo.DhcpFailoverRole;
+                        _dhcpFailoverState = clusterNodeInfo.DhcpFailoverState;
 
                         int pauseRemaining = clusterNodeInfo.AutoFailoverPauseRemainingSeconds ?? 0;
                         _autoFailoverPausedUntil = pauseRemaining > 0 ? DateTime.UtcNow.AddSeconds(pauseRemaining) : default;
@@ -859,6 +863,34 @@ namespace DnsServerCore.Cluster
                     return _type == ClusterNodeType.Secondary ? _clusterManager.ConfigLastSynced : default;
 
                 return _configLastSynced;
+            }
+        }
+
+        public string DhcpFailoverRole
+        {
+            get
+            {
+                if (_state == ClusterNodeState.Self)
+                {
+                    DhcpFailoverManager failover = _clusterManager.DnsWebService.DhcpFailoverManager;
+                    return ((failover is not null) && failover.Enabled) ? failover.Role.ToString() : null;
+                }
+
+                return _dhcpFailoverRole;
+            }
+        }
+
+        public string DhcpFailoverState
+        {
+            get
+            {
+                if (_state == ClusterNodeState.Self)
+                {
+                    DhcpFailoverManager failover = _clusterManager.DnsWebService.DhcpFailoverManager;
+                    return ((failover is not null) && failover.Enabled) ? failover.State.ToString() : null;
+                }
+
+                return _dhcpFailoverState;
             }
         }
 

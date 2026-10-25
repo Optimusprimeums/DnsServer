@@ -182,6 +182,12 @@ namespace DnsServerCore
                     if (pauseRemainingSeconds > 0)
                         jsonWriter.WriteNumber("autoFailoverPauseRemainingSeconds", pauseRemainingSeconds);
 
+                    if (clusterNode.DhcpFailoverRole is not null)
+                    {
+                        jsonWriter.WriteString("dhcpFailoverRole", clusterNode.DhcpFailoverRole);
+                        jsonWriter.WriteString("dhcpFailoverState", clusterNode.DhcpFailoverState);
+                    }
+
                     jsonWriter.WriteEndObject();
                 }
 
