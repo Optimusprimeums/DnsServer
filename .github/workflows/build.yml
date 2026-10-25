@@ -50,6 +50,9 @@ jobs:
 
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
+        env:
+          # default install dir (/usr/share/dotnet) needs root; the runner's tool cache is writable and persists between runs
+          DOTNET_INSTALL_DIR: ${{ runner.tool_cache }}/dotnet
         with:
           dotnet-version: 10.0.x
 
