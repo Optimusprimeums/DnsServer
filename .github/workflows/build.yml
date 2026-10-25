@@ -234,27 +234,68 @@ jobs:
             if (fs.readFileSync(path.join('bundle', 'version.txt'), 'utf8').trim() !== version)
               throw new Error('bundle version does not match build version');
 
-            // upstream installer with only the download URL and banner changed; DNS_TAR_URL overrides the URL
+            // upstream installer with these changes:
+            //  - download URL points at this fork's release (DNS_TAR_URL overrides it)
+            //  - curl follows redirects: GitHub release downloads redirect, and upstream's curl has no -L,
+            //    which silently saved an empty tarball
+            //  - archive is verified before extracting and extraction failures abort, so a bad download
+            //    leaves the running install untouched instead of reporting success
             function makeInstaller(tag) {
               const tarUrl = `${base}/releases/download/${tag}/DnsServerPortable.tar.gz`;
               const label = (tag === rollingTag) ? `${owner}/${repo} latest build` : `${owner}/${repo} ${version}`;
-              const lines = upstreamInstaller.replace(/\r\n/g, '\n').split('\n');
-              let urlReplaced = false;
 
-              const out = lines.map(function (line) {
-                if (line.startsWith('dnsUrl=')) {
-                  urlReplaced = true;
-                  return `dnsUrl="\${DNS_TAR_URL:-${tarUrl}}"`;
+              const replacements = [
+                {
+                  match: line => line.startsWith('dnsUrl='),
+                  replace: () => [`dnsUrl="\${DNS_TAR_URL:-${tarUrl}}"`]
+                },
+                {
+                  match: line => line === 'echo "Technitium DNS Server Installer"',
+                  replace: () => [`echo "Technitium DNS Server Installer (${label})"`]
+                },
+                {
+                  match: line => line === 'if ! curl -o $dnsTar --fail $dnsUrl >> $installLog 2>&1',
+                  replace: () => ['if ! curl -L -o $dnsTar --fail $dnsUrl >> $installLog 2>&1']
+                },
+                {
+                  match: line => line === 'tar -zxf $dnsTar -C $dnsDir >> $installLog 2>&1',
+                  replace: () => [
+                    'if ! tar -tzf $dnsTar > /dev/null 2>> $installLog',
+                    'then',
+                    '    echo "Downloaded file is not a valid Technitium DNS Server archive: $dnsTar"',
+                    '    echo "Nothing was changed; the installed version is still running. Please check \'$installLog\' for details."',
+                    '    exit 1',
+                    'fi',
+                    '',
+                    'if ! tar -zxf $dnsTar -C $dnsDir >> $installLog 2>&1',
+                    'then',
+                    '    echo "Failed to extract Technitium DNS Server to: $dnsDir"',
+                    '    echo "Please check \'$installLog\' for details."',
+                    '    exit 1',
+                    'fi'
+                  ]
+                }
+              ];
+
+              const counts = replacements.map(() => 0);
+              const out = [];
+
+              for (const line of upstreamInstaller.replace(/\r\n/g, '\n').split('\n')) {
+                const i = replacements.findIndex(r => r.match(line));
+
+                if (i < 0) {
+                  out.push(line);
+                  continue;
                 }
 
-                if (line === 'echo "Technitium DNS Server Installer"')
-                  return `echo "Technitium DNS Server Installer (${label})"`;
+                counts[i]++;
+                out.push(...replacements[i].replace());
+              }
 
-                return line;
+              counts.forEach(function (count, i) {
+                if (count !== 1)
+                  throw new Error(`installer patch ${i} matched ${count} lines in upstream install.sh (expected 1); upstream installer changed`);
               });
-
-              if (!urlReplaced)
-                throw new Error('dnsUrl line not found in upstream installer');
 
               return Buffer.from(out.join('\n'), 'utf8');
             }
