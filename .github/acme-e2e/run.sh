@@ -170,6 +170,13 @@ done
 docker exec "$DNS" curl -sSf -o /dev/null https://pebble:14000/dir
 echo "   Pebble directory reachable over trusted HTTPS"
 
+# Technitium resolves outbound host names (including the CA's) through its own DNS server, not Docker's
+# resolver, so publish the CA's name the way an internal CA would be: a record in a zone this server hosts
+PEBBLE_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$PEB")"
+api zones/create zone pebble type Primary >/dev/null
+api zones/records/add zone pebble domain pebble type A ipAddress "$PEBBLE_IP" ttl 60 >/dev/null
+echo "   CA name 'pebble' -> $PEBBLE_IP published in a local zone"
+
 # zones: acme.test (local zone + CNAME target), other.test (CNAME delegation), rfc.test (dynamic updates)
 api zones/create zone acme.test type Primary >/dev/null
 api zones/records/add zone acme.test domain ns1.acme.test type A ipAddress "$DNS_IP" ttl 60 >/dev/null
