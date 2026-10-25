@@ -3,6 +3,8 @@ name: Build
 on:
   push:
     branches: [master, "fork/**", "feature/**"]
+    # docs-only pushes would otherwise publish a new numbered release with identical binaries
+    paths-ignore: ["docs/**", "**/*.md"]
   pull_request:
   workflow_dispatch:
     inputs:
