@@ -4,6 +4,7 @@ This fork of [Technitium DNS Server](https://github.com/TechnitiumSoftware/DnsSe
 
 - redundant DHCP. See [DHCP-FAILOVER.md](DHCP-FAILOVER.md).
 - cluster improvements, including 2-node auto failover. See [CLUSTER-IMPROVEMENTS.md](CLUSTER-IMPROVEMENTS.md).
+- automatic TLS certificates (ACME, DNS-01) for the web console and encrypted DNS. See [ACME.md](ACME.md).
 
 ## How the branches fit together
 
@@ -13,11 +14,12 @@ The features are developed as separate upstream pull requests. This fork's build
 |---|---|---|---|
 | `upstream/dhcp-failover` | `TechnitiumSoftware/develop` | DHCP failover only | Pull request to upstream |
 | `upstream/cluster-improvements` | `TechnitiumSoftware/develop` | Cluster improvements only | Pull request to upstream |
-| `fork/main` | latest upstream release (`master`) | both features, plus fork-only additions | What CI builds and the installer ships |
+| `upstream/acme` | `TechnitiumSoftware/develop` | ACME certificates only | Pull request to upstream |
+| `fork/main` | latest upstream release (`master`) | all three features, plus fork-only additions | What CI builds and the installer ships |
 
-The two upstream branches don't depend on each other and merge cleanly in either order. `fork/main` carries the same feature commits, cherry-picked onto the release. Its fork-only additions are:
+The upstream branches don't depend on each other and merge cleanly in any order. `fork/main` carries the same feature commits, cherry-picked onto the release. Its fork-only additions are:
 
-- CI;
+- CI, including the ACME end-to-end test against Pebble (`.github/acme-e2e/run.sh`), which must pass before a release is published;
 - the installer and release publishing;
 - fork version numbers and the update feed;
 - the DHCP failover state shown in the Cluster node table, which needs both features.

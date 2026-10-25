@@ -1,8 +1,8 @@
 # Development notes: DHCP failover, cluster improvements, fork build
 
-A complete record of what was changed in this fork, why, the bugs found along the way, and how the pieces fit together. For user-facing setup, see [DHCP-FAILOVER.md](../DHCP-FAILOVER.md), [CLUSTER-IMPROVEMENTS.md](../CLUSTER-IMPROVEMENTS.md) and [FORK.md](../FORK.md). Ready-to-paste upstream PR descriptions are in [docs/upstream-prs/](upstream-prs/).
+A complete record of what was changed in this fork, why, the bugs found along the way, and how the pieces fit together. For user-facing setup, see [DHCP-FAILOVER.md](../DHCP-FAILOVER.md), [CLUSTER-IMPROVEMENTS.md](../CLUSTER-IMPROVEMENTS.md), [ACME.md](../ACME.md) and [FORK.md](../FORK.md). Ready-to-paste upstream PR descriptions are in [docs/upstream-prs/](upstream-prs/).
 
-Work done 2026-10-24 and 2026-10-25.
+Work done 2026-10-24 to 2026-10-25. Section 4b (ACME) was added on 2026-10-25.
 
 ---
 
@@ -188,6 +188,50 @@ Push builds are never cancelled mid-release (`cancel-in-progress` is on for PRs 
 
 ---
 
+## 4b. ACME certificates (`upstream/acme`)
+
+**Request:** the server should get its own certificates via ACME + DNS-01, set up in the GUI so rollout is easier.
+
+**Scope decisions (from the user):**
+- certificates for **this server only**: the web console plus DoT/DoH/DoQ;
+- the domain's public DNS is currently at **Cloudflare**, but the PR shouldn't be limited to one provider, so providers are pluggable.
+
+**Design:**
+- **`AcmeClient`:** an in-house RFC 8555 client. ES256 account key; JWS with `jwk` only for newAccount and `kid` everywhere else; Replay-Nonce handling with badNonce retry x3; EAB (HS256); order, authorization, dns-01, finalize polling, PEM chain download. No new NuGet dependency.
+- **`IDns01Provider`** with three providers:
+  - **LocalZone:** a Primary zone on this server; uses `AuthZoneManager.AddRecord`/`DeleteRecord`, which bump the SOA serial and send NOTIFY.
+  - **Rfc2136:** UPDATE with the zone in the question section and updates in the authority section; delete-specific-RR uses class NONE / TTL 0; TSIG via `TsigResolveAsync`; the zone is found by asking the update server for the SOA.
+  - **Cloudflare:** API token; zone found by walking up the name; TXT content quoted.
+- **`Dns01Resolver`:**
+  - follows `_acme-challenge` CNAMEs through public resolvers (default 1.1.1.1, 8.8.8.8, 9.9.9.9; configurable);
+  - finds the zone's public NS and queries them directly, non-recursively;
+  - skips servers that don't respond (no IPv6);
+  - if none responds within 30 seconds (no NAT hairpin), continues with a warning.
+- **`AcmeManager`:**
+  - `config/acme/acme.config` (binary `"AC"` v1) and `config/acme/certificate.pfx` (random password, saved before the file is written);
+  - renewal check 2 minutes after start, then every 6 hours; renews 30 days before expiry, when the names change, or when there's no certificate;
+  - re-registers if the CA reports `accountDoesNotExist`/`unauthorized`;
+  - refuses settings changes during a run;
+  - cancels a run on shutdown.
+- **Install:** new `DnsWebService.InstallWebServiceTlsCertificate` (plus Cluster `UpdateSelfNodeUrlAndCertificate` and config save) and `InstallDnsTlsCertificate` (restarts the encrypted listeners only when the path changes). The DNS TLS path isn't overwritten by Cluster config transfer (`DnsServer.cs` applies it only when `!isConfigTransfer`), so each node keeps its own.
+- **API** `/api/settings/acme/{get,set,directoryInfo,request,testDns01}`:
+  - secrets are never returned;
+  - agreeing to the terms is explicit and resets when the CA changes;
+  - `directoryInfo` needs Modify, since it fetches an admin-supplied URL, and only returns http(s) terms links.
+- **GUI:** a Settings > Certificates (ACME) tab with its own Save button; the page-wide Save Settings button is hidden on this tab. It's per node: with "Cluster" selected it asks you to pick a node, and refuses to save if the node changed since loading.
+- **Insertion anchors:** chosen so this PR doesn't conflict with the other two. The field and init go after `_settingsApi`; the dispose goes after the cluster manager's.
+
+**Testing:** `.github/acme-e2e/run.sh` (fork-only), run by the `acme-e2e` CI job; releases depend on it.
+- **Setup:** Technitium (this build) and Pebble 2.10.1 on a private Docker network. Pebble validates through Technitium, and Technitium trusts Pebble's minica root. The CA name `pebble` is published in a local zone, because Technitium resolves outbound names through itself.
+- **Scenarios:**
+  1. local zone with a wildcard;
+  2. CNAME delegation;
+  3. RFC 2136 with a TSIG policy scoped to `_acme-challenge.dns.rfc.test|TXT`, reusing the account (the renewal path).
+- **Checks:** the HTTPS chain and host name verified against Pebble's root, and no leftover TXT records.
+- **Result:** green on run #12 (ci-build-5).
+
+---
+
 ## 6. Bugs and mistakes found, and how they were fixed
 
 | # | Problem | Found by | Fix |
@@ -205,6 +249,15 @@ Push builds are never cancelled mid-release (`cancel-in-progress` is on for PRs 
 | 11 | Installer saved an empty tarball (no `curl -L`) and reported success | install on ns2 (stayed on 15.6.0) | Patched installer lines; verified against the live release |
 | 12 | Everything on one branch, so it couldn't be submitted as separate PRs | user feedback | Split into `upstream/*` + `fork/main` |
 | 13 | The two PR branches conflicted when combined (same insertion anchors) | merge test | Moved the DHCP branch's insertions to their own anchors |
+| 14 | ACME: every run after the first failed, because `NewOrderAsync` read the directory before it was loaded, so renewals would never work | independent review | Load the directory in `NewOrderAsync`; covered by e2e scenario 3 |
+| 15 | ACME: agreement to the CA's terms carried over to a different CA | independent review | Reset on CA change (API default + UI untick) |
+| 16 | ACME: saved fields (email, TSIG key, update server) couldn't be cleared | independent review | Missing = keep, empty = clear |
+| 17 | ACME: changing node on the tab showed stale data and could save to the wrong node | independent review | Reload on node change; refuse to save if the node changed |
+| 18 | ACME: settings save racing a running issuance (shared tmp file, CSR/order mismatch, PFX password not saved) | independent review | Run lock in `SetConfig`; config write lock; domain snapshot per run; password saved first |
+| 19 | ACME: propagation check failed when the zone's NS is the network's own public IP and there's no NAT hairpin | independent review | Skip with a warning if no server responds |
+| 20 | ACME: low findings (deleted account, shutdown, SSRF via directoryInfo, `javascript:` terms link, selector injection, test timeout, restart rule) | independent review | All fixed |
+| 21 | ACME PR initially conflicted with the DHCP PR (same anchors in DnsWebService) | cherry-pick onto fork/main | Moved ACME anchors; all three PR branches verified to merge in two orders and build |
+| 22 | ACME e2e first run: Technitium couldn't resolve the Docker name `pebble` (it resolves outbound names via itself) | first CI run | Publish `pebble` in a local zone in the test |
 
 ## 7. Verification status
 
@@ -214,11 +267,14 @@ Push builds are never cancelled mid-release (`cancel-in-progress` is on for PRs 
 - ✔ CI on the self-hosted runners is green.
 - ✔ Release assets were downloaded and checked: version strings, update URL, installer patches, tarball contents.
 - ✔ The installer download and verify lines were run against the live release.
-- ☐ **Not yet run on real servers with real DHCP clients or a live Cluster.** See the test plans in the two PR descriptions. Do this before submitting upstream.
+- ✔ ACME end-to-end against Pebble (three providers/paths, HTTPS verified) passes in CI on every push to `fork/main`.
+- ☐ **Not yet run on real servers with real DHCP clients or a live Cluster.** See the test plans in the PR descriptions. Do this before submitting upstream.
+- ☐ **ACME not yet run against a real CA**, i.e. Let's Encrypt staging with Cloudflare on ns2.
 
 ## 8. Open items
 
-- Test on the two homelab servers (ns2 + partner). Then fill in the "Testing" rows of both PR descriptions.
+- Test on the two homelab servers (ns2 + partner). Then fill in the "Testing" rows of the PR descriptions.
+- ACME on ns2: Let's Encrypt staging with the Cloudflare provider, then production.
 - Optional: delete the `v15.6.2.6` release (broken installer from before fix #11; it will be pruned eventually) and the old `ghcr.io/optimusprimeums/dnsserver` images.
 - Possible follow-ups:
   - a second heartbeat path (direct link) for 2-node clusters;
