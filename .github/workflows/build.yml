@@ -16,7 +16,8 @@ permissions:
 
 concurrency:
   group: build-${{ github.ref }}
-  cancel-in-progress: true
+  # never cancel a push build mid-release (it would leave fork-latest missing); PR builds can be superseded
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # TechnitiumLibrary is a separate repo that DnsServer references by relative path (../TechnitiumLibrary/bin).
@@ -24,8 +25,10 @@ env:
   TECHNITIUM_LIBRARY_REF: 4a5a530ac6c4114e72216e0b9c74208a7a5e3fa0
   DOTNET_NOLOGO: true
   DOTNET_CLI_TELEMETRY_OPTOUT: true
-  # rolling release the one-line installer downloads from; the branch that updates it is set in the release job's `if`
+  # rolling release the one-line installer and the web console update check use; the branch that updates it is set in the release job's `if`
   RELEASE_TAG: fork-latest
+  # how many numbered releases (v<version>) to keep for rollback
+  KEEP_NUMBERED_RELEASES: 20
 
 jobs:
   build:
@@ -36,6 +39,8 @@ jobs:
     permissions:
       contents: read
       packages: write # push image to ghcr.io
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - name: Checkout DnsServer
@@ -49,6 +54,30 @@ jobs:
           repository: TechnitiumSoftware/TechnitiumLibrary
           ref: ${{ github.event.inputs.technitium_library_ref || env.TECHNITIUM_LIBRARY_REF }}
           path: TechnitiumLibrary
+
+      # fork version = <upstream version>.<run number>, e.g. 15.6.2.57; the commit goes in the informational version
+      - name: Compute fork version
+        id: version
+        run: |
+          base=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' DnsServer/DnsServerApp/DnsServerApp.csproj | head -n 1)
+
+          if ! echo "$base" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error file=DnsServerApp/DnsServerApp.csproj::Expected a 3-part upstream <Version>, found '$base'"
+            exit 1
+          fi
+
+          if [ "${GITHUB_RUN_NUMBER}" -gt 65534 ]; then
+            echo "::error::Run number ${GITHUB_RUN_NUMBER} exceeds the assembly version limit (65534)"
+            exit 1
+          fi
+
+          version="${base}.${GITHUB_RUN_NUMBER}"
+          info="${version}+${GITHUB_SHA::7}"
+
+          echo "FORK_VERSION=${version}" >> "$GITHUB_ENV"
+          echo "FORK_INFO_VERSION=${info}" >> "$GITHUB_ENV"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "### Fork version ${info}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
@@ -70,31 +99,29 @@ jobs:
           dotnet build TechnitiumLibrary/TechnitiumLibrary.Net/TechnitiumLibrary.Net.csproj -c Release
           dotnet build TechnitiumLibrary/TechnitiumLibrary.Security.OTP/TechnitiumLibrary.Security.OTP.csproj -c Release
 
+      # version and update feed are set at build time so the project files stay identical to upstream
       - name: Publish DnsServerApp
-        run: dotnet publish DnsServer/DnsServerApp/DnsServerApp.csproj -c Release
+        run: |
+          dotnet publish DnsServer/DnsServerApp/DnsServerApp.csproj -c Release \
+            -p:Version="${FORK_VERSION}" \
+            -p:InformationalVersion="${FORK_INFO_VERSION}" \
+            -p:UpdateCheckUri="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/update.json"
 
       # same layout and file name as the official DnsServerPortable.tar.gz, so the stock installer logic works unchanged
-      - name: Package portable tarball and installer
+      - name: Package portable tarball
         run: |
-          mkdir -p bundle
-          tar -czf bundle/DnsServerPortable.tar.gz -C DnsServer/DnsServerApp/bin/Release/publish .
-
-          # generate the fork installer from upstream's installer by swapping only the download URL
           officialUrl='dnsUrl="https://download.technitium.com/dns/DnsServerPortable.tar.gz"'
-          forkUrl="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/DnsServerPortable.tar.gz"
 
           if ! grep -qF "$officialUrl" DnsServer/DnsServerApp/install.sh; then
-            echo "::error file=DnsServerApp/install.sh::Download URL line not found; upstream installer changed, update this step"
+            echo "::error file=DnsServerApp/install.sh::Download URL line not found; upstream installer changed, update the release job"
             exit 1
           fi
 
-          sed -e "s#^dnsUrl=.*#dnsUrl=\"\${DNS_TAR_URL:-${forkUrl}}\"#" \
-              -e "s#^echo \"Technitium DNS Server Installer\"#echo \"Technitium DNS Server Installer (${GITHUB_REPOSITORY} build)\"#" \
-              DnsServer/DnsServerApp/install.sh > bundle/install.sh
-          chmod +x bundle/install.sh
+          mkdir -p bundle
+          tar -czf bundle/DnsServerPortable.tar.gz -C DnsServer/DnsServerApp/bin/Release/publish .
+          cp DnsServer/DnsServerApp/install.sh bundle/install.upstream.sh
+          echo "${FORK_VERSION}" > bundle/version.txt
 
-          sh -n bundle/install.sh
-          grep -n '^dnsUrl=' bundle/install.sh
           tar -tzf bundle/DnsServerPortable.tar.gz | grep -qx './DnsServerApp.dll'
           tar -tzf bundle/DnsServerPortable.tar.gz | grep -qx './systemd.service'
 
@@ -138,9 +165,12 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/dnsserver
           tags: |
+            type=raw,value=${{ env.FORK_VERSION }}
             type=ref,event=branch
             type=sha,prefix=sha-,format=short
             type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.version=${{ env.FORK_INFO_VERSION }}
 
       # pull requests only build the image; pushes to this repo also publish it
       - name: Build and push Docker image
@@ -157,19 +187,21 @@ jobs:
       - name: Upload build
         uses: actions/upload-artifact@v4
         with:
-          name: DnsServer-${{ github.sha }}
+          name: DnsServer-${{ env.FORK_VERSION }}
           path: DnsServer/DnsServerApp/bin/Release/publish
           retention-days: 14
           if-no-files-found: error
 
-  # rolling pre-release so homelab servers can install/update with:
-  #   curl -sSL https://github.com/<owner>/DnsServer/releases/download/fork-latest/install.sh | sudo bash
+  # Publishes two releases per build:
+  #   v<version>   - kept for rollback; its install.sh installs exactly that build
+  #   fork-latest  - rolling; its install.sh always installs the newest build, and its update.json feeds the web console update check
+  # Install/update:  curl -sSL https://github.com/<owner>/DnsServer/releases/download/fork-latest/install.sh | sudo bash
   release:
     needs: build
     # change the branch here (e.g. to master) once the fork's work is merged there
     if: github.event_name == 'push' && github.ref_name == 'feature/dhcp-failover'
     runs-on: [self-hosted, Linux, X64, big]
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: write
 
@@ -180,65 +212,151 @@ jobs:
           name: install-bundle
           path: bundle
 
-      - name: Replace rolling release
+      - name: Publish releases
         uses: actions/github-script@v7
+        env:
+          FORK_VERSION: ${{ needs.build.outputs.version }}
         with:
           script: |
             const fs = require('fs');
             const path = require('path');
             const { owner, repo } = context.repo;
-            const tag = process.env.RELEASE_TAG;
-
-            // drop the previous release and tag so the tag always points at the build's commit
-            try {
-              const existing = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
-              await github.rest.repos.deleteRelease({ owner, repo, release_id: existing.data.id });
-            } catch (e) {
-              if (e.status !== 404) throw e;
-            }
-
-            try {
-              await github.rest.git.deleteRef({ owner, repo, ref: `tags/${tag}` });
-            } catch (e) {
-              if ((e.status !== 404) && (e.status !== 422)) throw e;
-            }
-
+            const version = process.env.FORK_VERSION;
+            const rollingTag = process.env.RELEASE_TAG;
+            const keep = parseInt(process.env.KEEP_NUMBERED_RELEASES, 10);
+            const branch = context.ref.replace('refs/heads/', '');
             const shortSha = context.sha.substring(0, 7);
-            const installUrl = `https://github.com/${owner}/${repo}/releases/download/${tag}/install.sh`;
+            const numberedTag = `v${version}`;
+            const base = `https://github.com/${owner}/${repo}`;
+            const upstreamInstaller = fs.readFileSync(path.join('bundle', 'install.upstream.sh'), 'utf8');
+            const tarball = fs.readFileSync(path.join('bundle', 'DnsServerPortable.tar.gz'));
 
-            const release = await github.rest.repos.createRelease({
-              owner, repo,
-              tag_name: tag,
-              target_commitish: context.sha,
-              name: `Fork build ${shortSha} (${context.ref.replace('refs/heads/', '')})`,
-              prerelease: true,
-              body: [
-                `Automated build of \`${context.ref.replace('refs/heads/', '')}\` at ${context.sha}.`,
+            if (fs.readFileSync(path.join('bundle', 'version.txt'), 'utf8').trim() !== version)
+              throw new Error('bundle version does not match build version');
+
+            // upstream installer with only the download URL and banner changed; DNS_TAR_URL overrides the URL
+            function makeInstaller(tag) {
+              const tarUrl = `${base}/releases/download/${tag}/DnsServerPortable.tar.gz`;
+              const label = (tag === rollingTag) ? `${owner}/${repo} latest build` : `${owner}/${repo} ${version}`;
+              const lines = upstreamInstaller.replace(/\r\n/g, '\n').split('\n');
+              let urlReplaced = false;
+
+              const out = lines.map(function (line) {
+                if (line.startsWith('dnsUrl=')) {
+                  urlReplaced = true;
+                  return `dnsUrl="\${DNS_TAR_URL:-${tarUrl}}"`;
+                }
+
+                if (line === 'echo "Technitium DNS Server Installer"')
+                  return `echo "Technitium DNS Server Installer (${label})"`;
+
+                return line;
+              });
+
+              if (!urlReplaced)
+                throw new Error('dnsUrl line not found in upstream installer');
+
+              return Buffer.from(out.join('\n'), 'utf8');
+            }
+
+            async function deleteReleaseAndTag(tag) {
+              try {
+                const existing = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+                await github.rest.repos.deleteRelease({ owner, repo, release_id: existing.data.id });
+              } catch (e) {
+                if (e.status !== 404) throw e;
+              }
+
+              try {
+                await github.rest.git.deleteRef({ owner, repo, ref: `tags/${tag}` });
+              } catch (e) {
+                if ((e.status !== 404) && (e.status !== 422)) throw e;
+              }
+            }
+
+            async function createRelease(tag, name, body, assets) {
+              const release = await github.rest.repos.createRelease({
+                owner, repo,
+                tag_name: tag,
+                target_commitish: context.sha,
+                name,
+                body,
+                prerelease: true
+              });
+
+              for (const [assetName, data, contentType] of assets) {
+                await github.rest.repos.uploadReleaseAsset({
+                  owner, repo,
+                  release_id: release.data.id,
+                  name: assetName,
+                  data,
+                  headers: { 'content-type': contentType, 'content-length': data.length }
+                });
+              }
+            }
+
+            function releaseBody(installTag, note) {
+              return [
+                `Automated build **${version}** of \`${branch}\` at ${context.sha}.`,
                 '',
-                'Install or update in place (keeps settings in /etc/dns):',
+                note,
                 '```',
-                `curl -sSL ${installUrl} | sudo bash`,
+                `curl -sSL ${base}/releases/download/${installTag}/install.sh | sudo bash`,
                 '```',
                 '',
                 'Docker:',
                 '```',
-                `docker pull ghcr.io/${owner.toLowerCase()}/dnsserver:sha-${shortSha}`,
-                '```'
-              ].join('\n')
-            });
-
-            for (const name of ['DnsServerPortable.tar.gz', 'install.sh']) {
-              const data = fs.readFileSync(path.join('bundle', name));
-              await github.rest.repos.uploadReleaseAsset({
-                owner, repo,
-                release_id: release.data.id,
-                name,
-                data,
-                headers: {
-                  'content-type': name.endsWith('.gz') ? 'application/gzip' : 'text/x-shellscript',
-                  'content-length': data.length
-                }
-              });
+                `docker pull ghcr.io/${owner.toLowerCase()}/dnsserver:${version}`,
+                '```',
+                '',
+                `Changes: ${base}/commits/${context.sha}`
+              ].join('\n');
             }
 
-            core.notice(`Install with: curl -sSL ${installUrl} | sudo bash`);
+            // 1. numbered release first so the feed below never points at a missing release
+            await deleteReleaseAndTag(numberedTag); // only exists if this run is re-run
+            await createRelease(numberedTag, `v${version}`,
+              releaseBody(numberedTag, 'Install or roll back to exactly this build (keeps settings in /etc/dns):'),
+              [
+                ['DnsServerPortable.tar.gz', tarball, 'application/gzip'],
+                ['install.sh', makeInstaller(numberedTag), 'text/x-shellscript']
+              ]);
+
+            // 2. update feed in the format the web console's "check for update" expects
+            const updateJson = Buffer.from(JSON.stringify({
+              updateVersion: version,
+              updateTitle: `Fork build ${version} is available`,
+              updateMessage: `A new build of the ${owner}/${repo} fork is available. Update by running the install command again; settings in /etc/dns are kept.`,
+              downloadLink: `${base}/releases/tag/${numberedTag}`,
+              instructionsLink: `${base}/blob/${branch}/FORK.md`,
+              changeLogLink: `${base}/commits/${branch}`
+            }, null, 2), 'utf8');
+
+            // 3. rolling release
+            await deleteReleaseAndTag(rollingTag);
+            await createRelease(rollingTag, `Latest fork build (${version})`,
+              releaseBody(rollingTag, 'Install or update to the newest build (keeps settings in /etc/dns):'),
+              [
+                ['DnsServerPortable.tar.gz', tarball, 'application/gzip'],
+                ['install.sh', makeInstaller(rollingTag), 'text/x-shellscript'],
+                ['update.json', updateJson, 'application/json']
+              ]);
+
+            // 4. prune old numbered releases
+            const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
+            const numbered = releases
+              .filter(r => /^v\d+\.\d+\.\d+\.\d+$/.test(r.tag_name))
+              .sort((a, b) => {
+                const pa = a.tag_name.substring(1).split('.').map(Number);
+                const pb = b.tag_name.substring(1).split('.').map(Number);
+                for (let i = 0; i < 4; i++)
+                  if (pa[i] !== pb[i]) return pb[i] - pa[i];
+                return 0;
+              });
+
+            for (const old of numbered.slice(keep)) {
+              core.info(`Pruning old release ${old.tag_name}`);
+              await deleteReleaseAndTag(old.tag_name);
+            }
+
+            core.notice(`Published ${version}. Install: curl -sSL ${base}/releases/download/${rollingTag}/install.sh | sudo bash`);

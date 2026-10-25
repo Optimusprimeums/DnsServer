@@ -23,13 +23,29 @@ This is the official Technitium installer with only the download URL changed. It
 
 To go back to official Technitium, run the official installer. It installs over this fork the same way. One caveat: if you enabled Cluster auto failover or witness settings, the cluster config file is version 3, which official builds can't read. Leave the Cluster before switching back.
 
+## Versions, rollback and updates
+
+Fork builds are numbered **`<upstream version>.<CI run number>`**, for example `15.6.2.57`. That number is what the web console, the logs and the Cluster page show, so you can tell a fork build apart from official `15.6.2`, and one fork build from another. The assembly's informational version also carries the commit, for example `15.6.2.57+a1b2c3d`.
+
+Every build is also kept as a numbered release `v15.6.2.N`, holding the last 20. Each one has its own `install.sh` that installs exactly that build. To roll back or pin a server, run:
+
+```
+curl -sSL https://github.com/optimusprime-nn/DnsServer/releases/download/v15.6.2.57/install.sh | sudo bash
+```
+
+The web console's **check for update** reads `update.json` from the `fork-latest` release instead of Technitium's servers. It reports when a newer fork build exists, and its link goes to that build's release page. It never offers the official download. These settings are applied by CI at build time; a plain local build still checks Technitium.
+
 ## Docker
 
 ```
 docker pull ghcr.io/optimusprime-nn/dnsserver:feature-dhcp-failover
 ```
 
-Images are built for amd64 and arm64 (Raspberry Pi 4/5).
+Images are built for amd64 and arm64 (Raspberry Pi 4/5). They are tagged with:
+
+- the fork version (`15.6.2.57`), which never changes once published, so use it to pin a server;
+- the branch name, which moves to every new build;
+- `sha-<commit>`.
 
 ## Builds
 

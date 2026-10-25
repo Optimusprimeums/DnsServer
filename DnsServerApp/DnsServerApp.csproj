@@ -23,6 +23,11 @@
 		<ProjectReference Include="..\DnsServerCore\DnsServerCore.csproj" />
 	</ItemGroup>
 
+	<!-- fork builds set this from CI (-p:UpdateCheckUri=...) so the web console checks the fork's releases for updates -->
+	<ItemGroup Condition="'$(UpdateCheckUri)' != ''">
+		<AssemblyMetadata Include="UpdateCheckUri" Value="$(UpdateCheckUri)" />
+	</ItemGroup>
+
 	<ItemGroup>
 		<None Update="openrc.service">
 		  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

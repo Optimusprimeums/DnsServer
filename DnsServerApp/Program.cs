@@ -19,6 +19,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 using DnsServerCore;
 using System;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Runtime.InteropServices;
@@ -67,15 +68,34 @@ namespace DnsServerApp
 
                 Uri updateCheckUri;
 
-                switch (Environment.OSVersion.Platform)
-                {
-                    case PlatformID.Win32NT:
-                        updateCheckUri = new Uri("https://go.technitium.com/?id=41");
-                        break;
+                //builds can embed their own update feed (fork CI does); otherwise use the upstream feed
+                string? embeddedUpdateCheckUri = null;
 
-                    default:
-                        updateCheckUri = new Uri("https://go.technitium.com/?id=42");
+                foreach (AssemblyMetadataAttribute metadata in typeof(Program).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>())
+                {
+                    if (metadata.Key == "UpdateCheckUri")
+                    {
+                        embeddedUpdateCheckUri = metadata.Value;
                         break;
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(embeddedUpdateCheckUri))
+                {
+                    updateCheckUri = new Uri(embeddedUpdateCheckUri);
+                }
+                else
+                {
+                    switch (Environment.OSVersion.Platform)
+                    {
+                        case PlatformID.Win32NT:
+                            updateCheckUri = new Uri("https://go.technitium.com/?id=41");
+                            break;
+
+                        default:
+                            updateCheckUri = new Uri("https://go.technitium.com/?id=42");
+                            break;
+                    }
                 }
 
                 service = new DnsWebService(isPortableApp, configFolder, updateCheckUri);
