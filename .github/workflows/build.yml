@@ -1,0 +1,80 @@
+name: Build
+
+on:
+  push:
+    branches: [master, "feature/**"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      technitium_library_ref:
+        description: "TechnitiumLibrary commit, tag or branch to build against"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # TechnitiumLibrary is a separate repo that DnsServer references by relative path (../TechnitiumLibrary/bin).
+  # Pinned so builds are reproducible; bump it when syncing with upstream.
+  TECHNITIUM_LIBRARY_REF: 4a5a530ac6c4114e72216e0b9c74208a7a5e3fa0
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout DnsServer
+        uses: actions/checkout@v4
+        with:
+          path: DnsServer
+
+      - name: Checkout TechnitiumLibrary
+        uses: actions/checkout@v4
+        with:
+          repository: TechnitiumSoftware/TechnitiumLibrary
+          ref: ${{ github.event.inputs.technitium_library_ref || env.TECHNITIUM_LIBRARY_REF }}
+          path: TechnitiumLibrary
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build TechnitiumLibrary
+        run: |
+          dotnet build TechnitiumLibrary/TechnitiumLibrary.ByteTree/TechnitiumLibrary.ByteTree.csproj -c Release
+          dotnet build TechnitiumLibrary/TechnitiumLibrary.Net/TechnitiumLibrary.Net.csproj -c Release
+          dotnet build TechnitiumLibrary/TechnitiumLibrary.Security.OTP/TechnitiumLibrary.Security.OTP.csproj -c Release
+
+      - name: Publish DnsServerApp
+        run: dotnet publish DnsServer/DnsServerApp/DnsServerApp.csproj -c Release
+
+      - name: Check web console JavaScript syntax
+        working-directory: DnsServer/DnsServerCore/www/js
+        run: |
+          for f in *.js; do
+            case "$f" in *.min.js) continue ;; esac
+            node -e "new Function(require('fs').readFileSync(process.argv[1], 'utf8').replace(/^﻿/, ''))" "$f" \
+              || { echo "::error file=DnsServerCore/www/js/$f::JavaScript syntax error"; exit 1; }
+            echo "ok $f"
+          done
+
+      - name: Build Docker image (not pushed)
+        working-directory: DnsServer
+        run: docker build -t technitium-dns-fork:ci .
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: DnsServer-${{ github.sha }}
+          path: DnsServer/DnsServerApp/bin/Release/publish
+          retention-days: 14
+          if-no-files-found: error
