@@ -194,12 +194,43 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  # End-to-end ACME test against Pebble (Let's Encrypt's test CA): issues certificates through the local
+  # zone, CNAME delegation and RFC 2136 providers and verifies them over HTTPS. See .github/acme-e2e/run.sh.
+  acme-e2e:
+    needs: build
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "Linux", "X64", "big"]') }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout DnsServer
+        uses: actions/checkout@v4
+        with:
+          path: DnsServer
+
+      - name: Download build
+        uses: actions/download-artifact@v4
+        with:
+          name: DnsServer-${{ needs.build.outputs.version }}
+          path: DnsServer/DnsServerApp/bin/Release/publish
+
+      - name: Build local test image (amd64, not pushed)
+        working-directory: DnsServer
+        run: docker build -q -t "technitium-acme-e2e:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" .
+
+      - name: Run ACME end-to-end test
+        run: bash DnsServer/.github/acme-e2e/run.sh "technitium-acme-e2e:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+      - name: Remove test image
+        if: always()
+        run: docker rmi -f "technitium-acme-e2e:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >/dev/null 2>&1 || true
+
   # Publishes two releases per build:
   #   v<version>   - kept for rollback; its install.sh installs exactly that build
   #   fork-latest  - rolling; its install.sh always installs the newest build, and its update.json feeds the web console update check
   # Install/update:  curl -sSL https://github.com/<owner>/DnsServer/releases/download/fork-latest/install.sh | sudo bash
   release:
-    needs: build
+    # nothing is published unless the ACME end-to-end test passes too
+    needs: [build, acme-e2e]
     # change the branch here (e.g. to master) once the fork's work is merged there
     if: github.event_name == 'push' && github.ref_name == 'fork/main'
     runs-on: [self-hosted, Linux, X64, big]
