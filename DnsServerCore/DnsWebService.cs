@@ -2250,6 +2250,7 @@ namespace DnsServerCore
             _webService.MapGetAndPost("/api/admin/cluster/primary/updateSecondary", _clusterApi.UpdateSecondaryNode);
             _webService.MapGetAndPost("/api/admin/cluster/primary/transferConfig", _clusterApi.TransferConfigAsync);
             _webService.MapGetAndPost("/api/admin/cluster/primary/setOptions", _clusterApi.SetClusterOptions);
+            _webService.MapGetAndPost("/api/admin/cluster/primary/pauseAutoFailover", _clusterApi.PauseAutoFailover);
             _webService.MapGetAndPost("/api/admin/cluster/initJoin", _clusterApi.InitializeAndJoinClusterAsync);
             _webService.MapGetAndPost("/api/admin/cluster/secondary/leave", _clusterApi.LeaveClusterAsync);
             _webService.MapGetAndPost("/api/admin/cluster/secondary/notify", _clusterApi.ConfigUpdateNotificationAsync);
@@ -2257,6 +2258,7 @@ namespace DnsServerCore
             _webService.MapGetAndPost("/api/admin/cluster/secondary/updatePrimary", _clusterApi.UpdatePrimaryNodeAsync);
             _webService.MapGetAndPost("/api/admin/cluster/secondary/promote", _clusterApi.PromoteToPrimaryNodeAsync);
             _webService.MapGetAndPost("/api/admin/cluster/updateIpAddress", _clusterApi.UpdateSelfNodeIPAddress);
+            _webService.MapGetAndPost("/api/admin/cluster/primaryReachability", _clusterApi.GetPrimaryReachability);
 
             //logs
             _webService.MapGetAndPost("/api/logs/list", _logsApi.ListLogs);

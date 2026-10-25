@@ -64,6 +64,8 @@ namespace DnsServerCore.Cluster
         string _version;
         DateTime _upSince;
         DateTime _lastSeen;
+        DateTime _configLastSynced;
+        DateTime _autoFailoverPausedUntil;
         HttpApiClient _apiClient;
 
         Timer _heartbeatTimer;
@@ -227,18 +229,28 @@ namespace DnsServerCore.Cluster
                 ClusterInfo clusterInfo = await GetClusterStateAsync();
 
                 if (_type == ClusterNodeType.Primary)
+                {
                     _clusterManager.UpdateClusterFromPrimaryNode(clusterInfo); //update cluster nodes from primary node response
+                    _clusterManager.CheckConfigFreshnessFromPrimaryNode(clusterInfo); //sync if a notify was missed
+                }
 
-                //update version & up since time
+                //update version, up since time and health info
                 foreach (ClusterInfo.ClusterNodeInfo clusterNodeInfo in clusterInfo.ClusterNodes)
                 {
                     if (clusterNodeInfo.Name.Equals(Name, StringComparison.OrdinalIgnoreCase))
                     {
                         _version = clusterNodeInfo.Version;
                         _upSince = clusterNodeInfo.UpSince ?? default;
+                        _configLastSynced = clusterNodeInfo.ConfigLastSynced ?? default;
+
+                        int pauseRemaining = clusterNodeInfo.AutoFailoverPauseRemainingSeconds ?? 0;
+                        _autoFailoverPausedUntil = pauseRemaining > 0 ? DateTime.UtcNow.AddSeconds(pauseRemaining) : default;
                         break;
                     }
                 }
+
+                //detect a different primary in the remote node's view (auto failover fencing)
+                _clusterManager.CheckPrimaryConsistency(this, clusterInfo);
             }
             catch (TaskCanceledException)
             {
@@ -504,6 +516,26 @@ namespace DnsServerCore.Cluster
 
                 _lastSeen = DateTime.UtcNow;
                 _state = ClusterNodeState.Connected;
+            }
+            catch
+            {
+                _state = ClusterNodeState.Unreachable;
+                throw;
+            }
+        }
+
+        public async Task<ClusterPrimaryReachability> GetPrimaryReachabilityAsync(string candidateNodeName, CancellationToken cancellationToken = default)
+        {
+            HttpApiClient apiClient = GetApiClient();
+
+            try
+            {
+                ClusterPrimaryReachability reachability = await apiClient.GetClusterPrimaryReachabilityAsync(candidateNodeName, cancellationToken);
+
+                _lastSeen = DateTime.UtcNow;
+                _state = ClusterNodeState.Connected;
+
+                return reachability;
             }
             catch
             {
@@ -818,6 +850,29 @@ namespace DnsServerCore.Cluster
 
         public DateTime LastSeen
         { get { return _lastSeen; } }
+
+        public DateTime ConfigLastSynced
+        {
+            get
+            {
+                if (_state == ClusterNodeState.Self)
+                    return _type == ClusterNodeType.Secondary ? _clusterManager.ConfigLastSynced : default;
+
+                return _configLastSynced;
+            }
+        }
+
+        public int AutoFailoverPauseRemainingSeconds
+        {
+            get
+            {
+                if (_state == ClusterNodeState.Self)
+                    return _clusterManager.AutoFailoverPauseRemainingSeconds;
+
+                double remaining = (_autoFailoverPausedUntil - DateTime.UtcNow).TotalSeconds;
+                return remaining > 0 ? (int)Math.Ceiling(remaining) : 0;
+            }
+        }
 
         #endregion
     }

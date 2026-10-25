@@ -28,6 +28,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -59,6 +60,28 @@ namespace DnsServerCore.Cluster
         ushort _configRefreshIntervalSeconds;
         ushort _configRetryIntervalSeconds;
         DateTime _configLastSynced;
+        DateTime _configLastModified = DateTime.UtcNow; //primary only; startup time makes secondaries check once after a restart
+
+        //auto failover; cluster wide options set on primary
+        const ushort AUTO_FAILOVER_TIMEOUT_SECONDS = 120;
+        const int AUTO_FAILOVER_TIMER_INTERVAL = 10000;
+        bool _autoFailoverEnabled;
+        string _autoFailoverSuccessorNodeName;
+        ushort _autoFailoverTimeoutSeconds = AUTO_FAILOVER_TIMEOUT_SECONDS;
+        IReadOnlyList<IPAddress> _autoFailoverWitnessAddresses; //2-node tie breaker; null = successor's default gateway
+        DateTime _autoFailoverPausedUntil; //local clock; set from primary for planned maintenance
+        const int LIVENESS_PROBE_TIMEOUT = 3000;
+        readonly Timer _autoFailoverTimer;
+        int _autoFailoverInProgress;
+        readonly Lock _voteLock = new Lock();
+        string _voteGrantedTo;
+        DateTime _voteGrantedOn;
+        readonly Dictionary<int, DateTime> _staleNodeNotifiedOn = new Dictionary<int, DateTime>();
+        const int STALE_NODE_NOTIFY_INTERVAL_SECONDS = 300;
+
+        //set when another node in this cluster has taken over as primary while this primary was unreachable
+        volatile bool _fenced;
+        string _fencedByNodeName;
 
         IReadOnlyDictionary<int, ClusterNode> _clusterNodes;
 
@@ -94,6 +117,7 @@ namespace DnsServerCore.Cluster
             _configRefreshTimer = new Timer(ConfigRefreshTimerCallbackAsync);
             _notifyAllSecondaryNodesTimer = new Timer(NotifyAllSecondaryNodesTimerCallbackAsync);
             _clusterUpdateForSecondaryNodeChangesTimer = new Timer(ClusterUpdateForSecondaryNodeChangesTimerCallbackAsync);
+            _autoFailoverTimer = new Timer(AutoFailoverTimerCallbackAsync, null, AUTO_FAILOVER_TIMER_INTERVAL, AUTO_FAILOVER_TIMER_INTERVAL);
 
             _saveTimer = new Timer(delegate (object state)
             {
@@ -160,6 +184,7 @@ namespace DnsServerCore.Cluster
             _configRefreshTimer?.Dispose();
             _notifyAllSecondaryNodesTimer?.Dispose();
             _clusterUpdateForSecondaryNodeChangesTimer?.Dispose();
+            _autoFailoverTimer?.Dispose();
 
             DisposeAllNodes();
 
@@ -322,6 +347,14 @@ namespace DnsServerCore.Cluster
                 _configLastSynced = default;
                 _clusterNodes = null;
 
+                _autoFailoverEnabled = false;
+                _autoFailoverSuccessorNodeName = null;
+                _autoFailoverTimeoutSeconds = AUTO_FAILOVER_TIMEOUT_SECONDS;
+                _autoFailoverWitnessAddresses = null;
+                _autoFailoverPausedUntil = default;
+                _fenced = false;
+                _fencedByNodeName = null;
+
                 //delete config file
                 string configFile = Path.Combine(_dnsWebService.ConfigFolder, "cluster.config");
 
@@ -354,6 +387,8 @@ namespace DnsServerCore.Cluster
             switch (version)
             {
                 case 1:
+                case 2:
+                case 3:
                     _clusterDomain = bR.ReadString();
                     _heartbeatRefreshIntervalSeconds = bR.ReadUInt16();
                     _heartbeatRetryIntervalSeconds = bR.ReadUInt16();
@@ -376,6 +411,55 @@ namespace DnsServerCore.Cluster
                     }
 
                     _clusterNodes = clusterNodes;
+
+                    if (version >= 2)
+                    {
+                        _autoFailoverEnabled = bR.ReadBoolean();
+
+                        _autoFailoverSuccessorNodeName = bR.ReadString();
+                        if (_autoFailoverSuccessorNodeName.Length == 0)
+                            _autoFailoverSuccessorNodeName = null;
+
+                        _autoFailoverTimeoutSeconds = bR.ReadUInt16();
+
+                        _fenced = bR.ReadBoolean();
+
+                        _fencedByNodeName = bR.ReadString();
+                        if (_fencedByNodeName.Length == 0)
+                            _fencedByNodeName = null;
+                    }
+                    else
+                    {
+                        _autoFailoverEnabled = false;
+                        _autoFailoverSuccessorNodeName = null;
+                        _autoFailoverTimeoutSeconds = AUTO_FAILOVER_TIMEOUT_SECONDS;
+                    }
+
+                    if (version >= 3)
+                    {
+                        int witnessCount = bR.ReadByte();
+                        if (witnessCount > 0)
+                        {
+                            IPAddress[] witnessAddresses = new IPAddress[witnessCount];
+
+                            for (int i = 0; i < witnessCount; i++)
+                                witnessAddresses[i] = IPAddressExtensions.ReadFrom(bR);
+
+                            _autoFailoverWitnessAddresses = witnessAddresses;
+                        }
+                        else
+                        {
+                            _autoFailoverWitnessAddresses = null;
+                        }
+
+                        _autoFailoverPausedUntil = s.ReadDateTime();
+                    }
+                    else
+                    {
+                        _autoFailoverWitnessAddresses = null;
+                        _autoFailoverPausedUntil = default;
+                    }
+
                     break;
 
                 default:
@@ -388,7 +472,7 @@ namespace DnsServerCore.Cluster
             BinaryWriter bW = new BinaryWriter(s);
 
             bW.Write(Encoding.ASCII.GetBytes("CL")); //format
-            bW.Write((byte)1); //version
+            bW.Write((byte)3); //version
 
             bW.Write(_clusterDomain);
             bW.Write(_heartbeatRefreshIntervalSeconds);
@@ -409,6 +493,28 @@ namespace DnsServerCore.Cluster
                 foreach (KeyValuePair<int, ClusterNode> node in clusterNodes)
                     node.Value.WriteTo(bW);
             }
+
+            bW.Write(_autoFailoverEnabled);
+            bW.Write(_autoFailoverSuccessorNodeName ?? "");
+            bW.Write(_autoFailoverTimeoutSeconds);
+
+            bW.Write(_fenced);
+            bW.Write(_fencedByNodeName ?? "");
+
+            IReadOnlyList<IPAddress> witnessAddresses = _autoFailoverWitnessAddresses;
+            if (witnessAddresses is null)
+            {
+                bW.Write((byte)0);
+            }
+            else
+            {
+                bW.Write(Convert.ToByte(witnessAddresses.Count));
+
+                foreach (IPAddress witnessAddress in witnessAddresses)
+                    witnessAddress.WriteTo(bW);
+            }
+
+            s.WriteDateTime(_autoFailoverPausedUntil);
         }
 
         #endregion
@@ -863,6 +969,9 @@ namespace DnsServerCore.Cluster
             if (GetSelfNode().Type != ClusterNodeType.Primary)
                 throw new DnsServerException("Failed to transfer configuration: only the Primary node can transfer the configuration.");
 
+            if (_fenced)
+                throw new DnsServerException("Failed to transfer configuration: this Primary node is fenced since node '" + _fencedByNodeName + "' has taken over as the Primary node.");
+
             return _dnsWebService.BackupConfigAsync(zipStream: zipStream,
                                                     authConfig: true,
                                                     clusterConfig: false,
@@ -941,6 +1050,479 @@ namespace DnsServerCore.Cluster
 
                 //trigger notify to all secondary nodes
                 TriggerNotifyAllSecondaryNodes();
+            }
+        }
+
+        public string ValidateAutoFailoverOptions(bool enabled, string successorNodeName, ushort timeoutSeconds, ushort heartbeatRefreshIntervalSeconds)
+        {
+            //returns normalized successor node name; throws if the options cannot be applied
+            if (!ClusterInitialized)
+                throw new DnsServerException("Failed to update Cluster auto failover options: the Cluster is not initialized.");
+
+            if (GetSelfNode().Type != ClusterNodeType.Primary)
+                throw new DnsServerException("Failed to update Cluster auto failover options: only the Primary node can update the Cluster options.");
+
+            if (string.IsNullOrWhiteSpace(successorNodeName))
+            {
+                successorNodeName = null;
+            }
+            else if (TryGetClusterNode(successorNodeName, out ClusterNode successorNode) && (successorNode.Type == ClusterNodeType.Secondary))
+            {
+                successorNodeName = successorNode.Name;
+            }
+            else
+            {
+                if (enabled)
+                    throw new DnsServerException("Failed to update Cluster auto failover options: the successor must be an existing Secondary node: " + successorNodeName);
+
+                successorNodeName = null; //stale successor while disabled; clear it instead of blocking the save
+            }
+
+            if (!enabled)
+                return successorNodeName;
+
+            if (successorNodeName is null)
+                throw new DnsServerException("Failed to update Cluster auto failover options: a successor node must be selected.");
+
+            //2-node clusters use a witness (default: successor's gateway) instead of a majority vote
+
+            if ((timeoutSeconds < 60) || (timeoutSeconds > 3600))
+                throw new ArgumentOutOfRangeException(nameof(timeoutSeconds), "Auto failover timeout must be between 60 and 3600 seconds.");
+
+            if (timeoutSeconds < (heartbeatRefreshIntervalSeconds * 2))
+                throw new ArgumentException("Failed to update Cluster auto failover options: the timeout must be at least twice the heartbeat refresh interval.");
+
+            return successorNodeName;
+        }
+
+        public void PauseAutoFailover(int minutes)
+        {
+            if (!ClusterInitialized)
+                throw new DnsServerException("Failed to pause auto failover: the Cluster is not initialized.");
+
+            if (GetSelfNode().Type != ClusterNodeType.Primary)
+                throw new DnsServerException("Failed to pause auto failover: only the Primary node can pause auto failover.");
+
+            if ((minutes < 0) || (minutes > 1440))
+                throw new ArgumentOutOfRangeException(nameof(minutes), "Pause duration must be between 0 and 1440 minutes.");
+
+            _autoFailoverPausedUntil = (minutes == 0) ? default : DateTime.UtcNow.AddMinutes(minutes);
+
+            SaveConfigFile(true);
+
+            //push to secondaries right away so the successor knows before the primary goes down for maintenance
+            TriggerNotifyAllSecondaryNodes(0);
+
+            if (minutes == 0)
+                _dnsWebService.LogManager.Write("Cluster auto failover was resumed.");
+            else
+                _dnsWebService.LogManager.Write("Cluster auto failover was paused for " + minutes + " minute(s) until " + _autoFailoverPausedUntil.ToString("u") + ".");
+        }
+
+        public bool IsAutoFailoverPaused
+        { get { return DateTime.UtcNow < _autoFailoverPausedUntil; } }
+
+        public int AutoFailoverPauseRemainingSeconds
+        {
+            get
+            {
+                double remaining = (_autoFailoverPausedUntil - DateTime.UtcNow).TotalSeconds;
+                return remaining > 0 ? (int)Math.Ceiling(remaining) : 0;
+            }
+        }
+
+        public void ValidateWitnessAddresses(IReadOnlyList<IPAddress> witnessAddresses)
+        {
+            if (witnessAddresses is null)
+                return;
+
+            if (witnessAddresses.Count > 10)
+                throw new DnsServerException("Failed to update Cluster auto failover options: at most 10 witness addresses can be specified.");
+
+            foreach (IPAddress witnessAddress in witnessAddresses)
+            {
+                if (IPAddress.IsLoopback(witnessAddress) || witnessAddress.Equals(IPAddress.Any) || witnessAddress.Equals(IPAddress.IPv6Any))
+                    throw new DnsServerException("Failed to update Cluster auto failover options: invalid witness address: " + witnessAddress.ToString());
+
+                foreach (KeyValuePair<int, ClusterNode> clusterNode in _clusterNodes)
+                {
+                    foreach (IPAddress nodeAddress in clusterNode.Value.IPAddresses)
+                    {
+                        if (nodeAddress.Equals(witnessAddress))
+                            throw new DnsServerException("Failed to update Cluster auto failover options: the witness must be a separate device (such as your router), not a Cluster node: " + witnessAddress.ToString());
+                    }
+                }
+            }
+        }
+
+        public void UpdateAutoFailoverOptions(bool enabled, string successorNodeName, ushort timeoutSeconds, IReadOnlyList<IPAddress> witnessAddresses)
+        {
+            successorNodeName = ValidateAutoFailoverOptions(enabled, successorNodeName, timeoutSeconds, _heartbeatRefreshIntervalSeconds);
+            ValidateWitnessAddresses(witnessAddresses);
+
+            if ((witnessAddresses is not null) && (witnessAddresses.Count == 0))
+                witnessAddresses = null;
+
+            if ((timeoutSeconds < 60) || (timeoutSeconds > 3600))
+                timeoutSeconds = _autoFailoverTimeoutSeconds; //keep a valid value when disabled
+
+            bool witnessesSame = (witnessAddresses is null) ? (_autoFailoverWitnessAddresses is null) : ((_autoFailoverWitnessAddresses is not null) && witnessAddresses.HasSameItems(_autoFailoverWitnessAddresses));
+
+            if ((_autoFailoverEnabled == enabled) && string.Equals(_autoFailoverSuccessorNodeName, successorNodeName, StringComparison.OrdinalIgnoreCase) && (_autoFailoverTimeoutSeconds == timeoutSeconds) && witnessesSame)
+                return;
+
+            _autoFailoverEnabled = enabled;
+            _autoFailoverSuccessorNodeName = successorNodeName;
+            _autoFailoverTimeoutSeconds = timeoutSeconds;
+            _autoFailoverWitnessAddresses = witnessAddresses;
+
+            SaveConfigFile();
+            TriggerNotifyAllSecondaryNodes();
+        }
+
+        public ClusterPrimaryReachability GetPrimaryReachability(string candidateNodeName)
+        {
+            //used by successor to collect votes; answers from this node's own heartbeat view of the primary
+            if (!ClusterInitialized)
+                throw new DnsServerException("The Cluster is not initialized.");
+
+            ClusterNode primaryNode = GetPrimaryNode();
+
+            ClusterPrimaryReachability reachability = new ClusterPrimaryReachability();
+            reachability.PrimaryNodeId = primaryNode.Id;
+
+            if (primaryNode.LastSeen != default)
+                reachability.PrimaryLastSeen = primaryNode.LastSeen;
+
+            if (primaryNode.State == ClusterNodeState.Self)
+            {
+                reachability.PrimaryReachable = true;
+                reachability.PrimaryLastSeen = DateTime.UtcNow;
+            }
+            else if (IsPrimaryNodeReachable(primaryNode))
+            {
+                reachability.PrimaryReachable = true;
+            }
+            else
+            {
+                //primary looks down; grant the vote only to the successor in this node's view and only once per window
+                reachability.PrimaryReachable = !TryGrantVote(candidateNodeName);
+            }
+
+            return reachability;
+        }
+
+        private bool TryGrantVote(string candidateNodeName)
+        {
+            if (string.IsNullOrEmpty(candidateNodeName) || !_autoFailoverEnabled || IsAutoFailoverPaused || !candidateNodeName.Equals(_autoFailoverSuccessorNodeName, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            lock (_voteLock)
+            {
+                DateTime utcNow = DateTime.UtcNow;
+
+                if ((_voteGrantedTo is not null) && (utcNow < _voteGrantedOn.AddSeconds(_autoFailoverTimeoutSeconds)) && !_voteGrantedTo.Equals(candidateNodeName, StringComparison.OrdinalIgnoreCase))
+                    return false; //already voted for another candidate in this window
+
+                _voteGrantedTo = candidateNodeName;
+                _voteGrantedOn = utcNow;
+                return true;
+            }
+        }
+
+        private bool IsPrimaryNodeReachable(ClusterNode primaryNode)
+        {
+            DateTime lastSeen = primaryNode.LastSeen;
+
+            //not contacted yet since this node started; count from start time so a fresh node does not vote too early
+            if (lastSeen == default)
+                lastSeen = _dnsWebService.UpTimeStamp;
+
+            return (primaryNode.State != ClusterNodeState.Unreachable) || (DateTime.UtcNow < lastSeen.AddSeconds(_autoFailoverTimeoutSeconds));
+        }
+
+        private async void AutoFailoverTimerCallbackAsync(object state)
+        {
+            if (Interlocked.CompareExchange(ref _autoFailoverInProgress, 1, 0) != 0)
+                return;
+
+            try
+            {
+                if (!_autoFailoverEnabled || !ClusterInitialized || (_autoFailoverSuccessorNodeName is null))
+                    return;
+
+                ClusterNode selfNode = GetSelfNode();
+                if ((selfNode.Type != ClusterNodeType.Secondary) || !selfNode.Name.Equals(_autoFailoverSuccessorNodeName, StringComparison.OrdinalIgnoreCase))
+                    return; //only the designated successor acts
+
+                ClusterNode primaryNode = GetPrimaryNode();
+                if (IsPrimaryNodeReachable(primaryNode))
+                    return;
+
+                if (IsAutoFailoverPaused)
+                    return; //planned maintenance on the primary
+
+                //heartbeat only proves the HTTPS API is down; if the DNS or web port still accepts connections the primary is alive
+                if (await IsPrimaryNodeProcessAliveAsync(primaryNode))
+                {
+                    _dnsWebService.LogManager.Write("Cluster auto failover: Primary node '" + primaryNode.ToString() + "' heartbeat is failing but it still accepts connections on its DNS or web service port; not promoting.");
+                    return;
+                }
+
+                //this node's own vote follows the same one-candidate-per-window rule as other voters
+                if (!TryGrantVote(selfNode.Name))
+                    return;
+
+                IReadOnlyDictionary<int, ClusterNode> clusterNodes = _clusterNodes;
+                int totalNodes = clusterNodes.Count;
+
+                if (totalNodes == 2)
+                {
+                    //no other voter exists; use the witness to prove this node is not the isolated one
+                    IReadOnlyList<IPAddress> witnessAddresses = _autoFailoverWitnessAddresses ?? GetDefaultGatewayAddresses();
+                    if (witnessAddresses.Count == 0)
+                    {
+                        _dnsWebService.LogManager.Write("Cluster auto failover: Primary node '" + primaryNode.ToString() + "' is unreachable but no witness address is configured and no default gateway was found; not promoting.");
+                        return;
+                    }
+
+                    IPAddress reachableWitness = await FindReachableWitnessAsync(witnessAddresses);
+                    if (reachableWitness is null)
+                    {
+                        _dnsWebService.LogManager.Write("Cluster auto failover: Primary node '" + primaryNode.ToString() + "' is unreachable but this node cannot reach any witness (" + witnessAddresses.Join() + ") either, so this node is likely the isolated one; not promoting.");
+                        return;
+                    }
+
+                    _dnsWebService.LogManager.Write("Cluster auto failover: Primary node '" + primaryNode.ToString() + "' is unreachable for more than " + _autoFailoverTimeoutSeconds + " seconds and does not accept connections, while witness " + reachableWitness.ToString() + " is reachable; promoting this node to Primary.");
+                }
+                else
+                {
+                    if (!await HasPrimaryDownQuorumAsync(selfNode, primaryNode, clusterNodes))
+                        return;
+                }
+
+                //promotion stops the config refresh timer under its lock, which waits for any in-flight sync to finish
+                await PromoteToPrimaryNodeAsync(true);
+
+                //successor is now the primary; require admin to choose a new successor
+                _autoFailoverEnabled = false;
+                _autoFailoverSuccessorNodeName = null;
+                SaveConfigFile();
+                TriggerNotifyAllSecondaryNodes();
+
+                _dnsWebService.LogManager.Write("Cluster auto failover: this node was promoted to Primary successfully. Auto failover was disabled; select a new successor node to enable it again. The former Primary node will be fenced when it comes back and must be rejoined as a Secondary node.");
+            }
+            catch (Exception ex)
+            {
+                _dnsWebService.LogManager.Write("Cluster auto failover failed.", ex);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _autoFailoverInProgress, 0);
+            }
+        }
+
+        private async Task<bool> HasPrimaryDownQuorumAsync(ClusterNode selfNode, ClusterNode primaryNode, IReadOnlyDictionary<int, ClusterNode> clusterNodes)
+        {
+            //collect votes from other secondary nodes; this node counts as one vote
+            {
+                int totalNodes = clusterNodes.Count;
+                int votesPrimaryDown = 1;
+
+                List<Task<ClusterPrimaryReachability>> voteTasks = new List<Task<ClusterPrimaryReachability>>();
+
+                using (CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
+                {
+                    foreach (KeyValuePair<int, ClusterNode> clusterNode in clusterNodes)
+                    {
+                        if ((clusterNode.Value.State == ClusterNodeState.Self) || (clusterNode.Value.Type == ClusterNodeType.Primary))
+                            continue;
+
+                        voteTasks.Add(clusterNode.Value.GetPrimaryReachabilityAsync(selfNode.Name, cts.Token));
+                    }
+
+                    foreach (Task<ClusterPrimaryReachability> voteTask in voteTasks)
+                    {
+                        try
+                        {
+                            ClusterPrimaryReachability vote = await voteTask;
+
+                            //vote counts only if the voter agrees on which node is the primary
+                            if ((vote.PrimaryNodeId == primaryNode.Id) && !vote.PrimaryReachable)
+                                votesPrimaryDown++;
+                        }
+                        catch
+                        {
+                            //unreachable voter does not count
+                        }
+                    }
+                }
+
+                int quorum = (totalNodes / 2) + 1;
+
+                if (votesPrimaryDown < quorum)
+                {
+                    _dnsWebService.LogManager.Write("Cluster auto failover: Primary node '" + primaryNode.ToString() + "' is unreachable from this node but only " + votesPrimaryDown + " of " + totalNodes + " nodes agree (quorum " + quorum + "); not promoting.");
+                    return false;
+                }
+
+                _dnsWebService.LogManager.Write("Cluster auto failover: Primary node '" + primaryNode.ToString() + "' is unreachable for more than " + _autoFailoverTimeoutSeconds + " seconds and " + votesPrimaryDown + " of " + totalNodes + " nodes agree; promoting this node to Primary.");
+                return true;
+            }
+        }
+
+        private static async Task<bool> TryConnectAsync(IPAddress address, int port, bool refusedMeansReachable)
+        {
+            using (Socket socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp))
+            using (CancellationTokenSource cts = new CancellationTokenSource(LIVENESS_PROBE_TIMEOUT))
+            {
+                try
+                {
+                    await socket.ConnectAsync(new IPEndPoint(address, port), cts.Token);
+                    return true;
+                }
+                catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionRefused)
+                {
+                    return refusedMeansReachable; //host answered with a reset so it is up, but nothing listens on the port
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+        }
+
+        private static async Task<bool> IsPrimaryNodeProcessAliveAsync(ClusterNode primaryNode)
+        {
+            //a running DNS server accepts TCP on port 53 and on its web service port; a refused connect means the server is down
+            List<Task<bool>> probes = new List<Task<bool>>();
+
+            foreach (IPAddress address in primaryNode.IPAddresses)
+            {
+                probes.Add(TryConnectAsync(address, 53, false));
+                probes.Add(TryConnectAsync(address, primaryNode.Url.Port, false));
+            }
+
+            foreach (bool alive in await Task.WhenAll(probes))
+            {
+                if (alive)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static IReadOnlyList<IPAddress> GetDefaultGatewayAddresses()
+        {
+            List<IPAddress> gateways = new List<IPAddress>();
+
+            foreach (NetworkInterface networkInterface in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if ((networkInterface.OperationalStatus != OperationalStatus.Up) || (networkInterface.NetworkInterfaceType == NetworkInterfaceType.Loopback))
+                    continue;
+
+                foreach (GatewayIPAddressInformation gateway in networkInterface.GetIPProperties().GatewayAddresses)
+                {
+                    IPAddress address = gateway.Address;
+
+                    if (address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any) || address.IsIPv6LinkLocal)
+                        continue;
+
+                    if (!gateways.Contains(address))
+                        gateways.Add(address);
+                }
+            }
+
+            return gateways;
+        }
+
+        private static async Task<IPAddress> FindReachableWitnessAsync(IReadOnlyList<IPAddress> witnessAddresses)
+        {
+            foreach (IPAddress witnessAddress in witnessAddresses)
+            {
+                //ping first; many routers answer it
+                for (int i = 0; i < 3; i++)
+                {
+                    try
+                    {
+                        using (Ping ping = new Ping())
+                        {
+                            PingReply reply = await ping.SendPingAsync(witnessAddress, LIVENESS_PROBE_TIMEOUT);
+                            if (reply.Status == IPStatus.Success)
+                                return witnessAddress;
+                        }
+                    }
+                    catch
+                    { }
+                }
+
+                //ICMP may be blocked; any TCP answer (accept or reset) on common router ports also proves reachability
+                foreach (int port in new int[] { 53, 80, 443 })
+                {
+                    if (await TryConnectAsync(witnessAddress, port, true))
+                        return witnessAddress;
+                }
+            }
+
+            return null;
+        }
+
+        public void CheckPrimaryConsistency(ClusterNode remoteNode, ClusterInfo remoteClusterInfo)
+        {
+            if (!ClusterInitialized || !remoteClusterInfo.ClusterInitialized || (remoteClusterInfo.ClusterNodes is null))
+                return;
+
+            if (!string.Equals(remoteClusterInfo.ClusterDomain, _clusterDomain, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            ClusterNode selfNode = GetSelfNode();
+            if (selfNode.Type != ClusterNodeType.Primary)
+                return;
+
+            ClusterInfo.ClusterNodeInfo remotePrimaryNodeInfo = null;
+
+            foreach (ClusterInfo.ClusterNodeInfo nodeInfo in remoteClusterInfo.ClusterNodes)
+            {
+                if (nodeInfo.Type.Equals(nameof(ClusterNodeType.Primary), StringComparison.OrdinalIgnoreCase))
+                {
+                    remotePrimaryNodeInfo = nodeInfo;
+                    break;
+                }
+            }
+
+            if ((remotePrimaryNodeInfo is null) || (remotePrimaryNodeInfo.Id == selfNode.Id))
+                return; //remote agrees this node is primary
+
+            if (_clusterNodes.ContainsKey(remotePrimaryNodeInfo.Id))
+            {
+                //remote follows another member of this cluster as primary: that node was promoted while this node was unreachable
+                if (!_fenced)
+                {
+                    _fencedByNodeName = remotePrimaryNodeInfo.Name;
+                    _fenced = true;
+
+                    //persist so the node stays fenced across restarts
+                    SaveConfigFile();
+
+                    _dnsWebService.LogManager.Write("Cluster: this Primary node is now FENCED. Node '" + remoteNode.ToString() + "' reports that '" + remotePrimaryNodeInfo.Name + "' is the Primary node. This node will stop notifying and serving configuration to Secondary nodes. Delete the Cluster on this node and join it to '" + remotePrimaryNodeInfo.Name + "' as a Secondary node.");
+                }
+            }
+            else if (!_fenced)
+            {
+                //remote still follows a former primary that this node replaced; tell it about this primary (rate limited)
+                lock (_staleNodeNotifiedOn)
+                {
+                    DateTime utcNow = DateTime.UtcNow;
+
+                    if (_staleNodeNotifiedOn.TryGetValue(remoteNode.Id, out DateTime notifiedOn) && (utcNow < notifiedOn.AddSeconds(STALE_NODE_NOTIFY_INTERVAL_SECONDS)))
+                        return;
+
+                    _staleNodeNotifiedOn[remoteNode.Id] = utcNow;
+                }
+
+                _dnsWebService.LogManager.Write("Cluster: node '" + remoteNode.ToString() + "' still follows former Primary node '" + remotePrimaryNodeInfo.Name + "'; notifying it of the current Primary node.");
+
+                _ = remoteNode.NotifySecondaryNodeAsync(selfNode);
             }
         }
 
@@ -1257,6 +1839,9 @@ namespace DnsServerCore.Cluster
 
         public void TriggerNotifyAllSecondaryNodes(int notifyInterval = NOTIFY_ALL_SECONDARY_NODES_TIMER_INTERVAL)
         {
+            //record change time so secondaries that miss the notify still detect it on their next heartbeat
+            _configLastModified = DateTime.UtcNow;
+
             if (_notifyAllSecondaryNodesTimerTriggered)
                 return;
 
@@ -1287,6 +1872,12 @@ namespace DnsServerCore.Cluster
 
                 if ((primaryNode is null) || (primaryNode.State != ClusterNodeState.Self))
                     throw new InvalidOperationException();
+
+                if (_fenced)
+                {
+                    _dnsWebService.LogManager.Write("Cluster notify was skipped: this Primary node is fenced since node '" + _fencedByNodeName + "' has taken over as the Primary node.");
+                    return;
+                }
 
                 List<Task> tasks = new List<Task>(clusterNodes.Count);
 
@@ -1606,6 +2197,23 @@ namespace DnsServerCore.Cluster
             return primaryNode;
         }
 
+        public void CheckConfigFreshnessFromPrimaryNode(ClusterInfo primaryNodeClusterInfo)
+        {
+            if (!ClusterInitialized || (GetSelfNode().Type != ClusterNodeType.Secondary))
+                return;
+
+            if (primaryNodeClusterInfo.ConfigLastModified is null)
+                return; //primary node does not support this
+
+            //last synced time comes from an HTTP date header with seconds precision so compare at that precision;
+            //a change in the same second as the last sync triggers one extra sync, which is harmless
+            DateTime configLastModified = primaryNodeClusterInfo.ConfigLastModified.Value.ToUniversalTime();
+            configLastModified = configLastModified.AddTicks(-(configLastModified.Ticks % TimeSpan.TicksPerSecond));
+
+            if (configLastModified >= _configLastSynced)
+                _ = InitializeConfigRefreshAsync(CONFIG_REFRESH_TIMER_INTERVAL);
+        }
+
         public void TriggerRefreshForConfig(IReadOnlyCollection<string> configRefreshIncludeZones = null)
         {
             //do validation
@@ -1696,7 +2304,16 @@ namespace DnsServerCore.Cluster
 
                 try
                 {
-                    _configRefreshTimer.Change(success ? _configRefreshIntervalSeconds * 1000 : _configRetryIntervalSeconds * 1000, Timeout.Infinite);
+                    //do not re-arm once this node is the primary (e.g. promoted while this callback was queued)
+                    if (ClusterInitialized && (GetSelfNode().Type == ClusterNodeType.Primary))
+                    {
+                        _configRefreshTimerTriggered = false;
+                        _configRefreshTimer.Change(Timeout.Infinite, Timeout.Infinite);
+                    }
+                    else
+                    {
+                        _configRefreshTimer.Change(success ? _configRefreshIntervalSeconds * 1000 : _configRetryIntervalSeconds * 1000, Timeout.Infinite);
+                    }
                 }
                 catch (ObjectDisposedException)
                 { }
@@ -1932,6 +2549,53 @@ namespace DnsServerCore.Cluster
             {
                 _configRetryIntervalSeconds = primaryNodeClusterInfo.ConfigRetryIntervalSeconds;
                 saveConfig = true;
+            }
+
+            //auto failover options; a primary without support reports disabled
+            if ((primaryNodeClusterInfo.AutoFailoverEnabled != _autoFailoverEnabled) || !string.Equals(primaryNodeClusterInfo.AutoFailoverSuccessorNodeName, _autoFailoverSuccessorNodeName, StringComparison.OrdinalIgnoreCase) || ((primaryNodeClusterInfo.AutoFailoverTimeoutSeconds > 0) && (primaryNodeClusterInfo.AutoFailoverTimeoutSeconds != _autoFailoverTimeoutSeconds)))
+            {
+                _autoFailoverEnabled = primaryNodeClusterInfo.AutoFailoverEnabled;
+                _autoFailoverSuccessorNodeName = primaryNodeClusterInfo.AutoFailoverSuccessorNodeName;
+
+                if (primaryNodeClusterInfo.AutoFailoverTimeoutSeconds > 0)
+                    _autoFailoverTimeoutSeconds = primaryNodeClusterInfo.AutoFailoverTimeoutSeconds;
+
+                saveConfig = true;
+            }
+
+            {
+                IReadOnlyList<IPAddress> witnessAddresses = null;
+
+                if ((primaryNodeClusterInfo.AutoFailoverWitnessAddresses is not null) && (primaryNodeClusterInfo.AutoFailoverWitnessAddresses.Length > 0))
+                    witnessAddresses = primaryNodeClusterInfo.AutoFailoverWitnessAddresses.Convert(IPAddress.Parse);
+
+                bool witnessesSame = (witnessAddresses is null) ? (_autoFailoverWitnessAddresses is null) : ((_autoFailoverWitnessAddresses is not null) && witnessAddresses.HasSameItems(_autoFailoverWitnessAddresses));
+                if (!witnessesSame)
+                {
+                    _autoFailoverWitnessAddresses = witnessAddresses;
+                    saveConfig = true;
+                }
+            }
+
+            if (primaryNodeClusterInfo.AutoFailoverPauseRemainingSeconds is not null)
+            {
+                //remaining seconds instead of an absolute time avoids clock skew between nodes
+                int remaining = primaryNodeClusterInfo.AutoFailoverPauseRemainingSeconds.Value;
+                DateTime pausedUntil = remaining > 0 ? DateTime.UtcNow.AddSeconds(remaining) : default;
+
+                bool wasPaused = IsAutoFailoverPaused;
+                bool isPaused = remaining > 0;
+
+                if ((wasPaused != isPaused) || (isPaused && (Math.Abs((pausedUntil - _autoFailoverPausedUntil).TotalSeconds) > 30)))
+                {
+                    _autoFailoverPausedUntil = pausedUntil;
+                    saveConfig = true;
+
+                    if (isPaused)
+                        _dnsWebService.LogManager.Write("Cluster auto failover was paused by the Primary node for " + remaining + " second(s).");
+                    else
+                        _dnsWebService.LogManager.Write("Cluster auto failover was resumed by the Primary node.");
+                }
             }
 
             //save changes
@@ -2228,6 +2892,27 @@ namespace DnsServerCore.Cluster
 
         public DateTime ConfigLastSynced
         { get { return _configLastSynced; } }
+
+        public DateTime ConfigLastModified
+        { get { return _configLastModified; } }
+
+        public bool AutoFailoverEnabled
+        { get { return _autoFailoverEnabled; } }
+
+        public string AutoFailoverSuccessorNodeName
+        { get { return _autoFailoverSuccessorNodeName; } }
+
+        public ushort AutoFailoverTimeoutSeconds
+        { get { return _autoFailoverTimeoutSeconds; } }
+
+        public IReadOnlyList<IPAddress> AutoFailoverWitnessAddresses
+        { get { return _autoFailoverWitnessAddresses; } }
+
+        public bool Fenced
+        { get { return _fenced; } }
+
+        public string FencedByNodeName
+        { get { return _fencedByNodeName; } }
 
         public IReadOnlyDictionary<int, ClusterNode> ClusterNodes
         { get { return _clusterNodes; } }

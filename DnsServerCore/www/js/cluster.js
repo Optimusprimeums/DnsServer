@@ -118,12 +118,25 @@ function reloadAdminClusterView(responseJSON) {
 
     if (responseJSON.response.clusterInitialized) {
         var selfNodeType;
+        var selfNodeVersion;
 
         for (var i = 0; i < responseJSON.response.clusterNodes.length; i++) {
             if (responseJSON.response.clusterNodes[i].state == "Self") {
                 selfNodeType = responseJSON.response.clusterNodes[i].type;
+                selfNodeVersion = responseJSON.response.clusterNodes[i].version;
                 break;
             }
+        }
+
+        //available only when viewing from the primary node
+        var configLastModified = responseJSON.response.configLastModified;
+
+        if (responseJSON.response.fenced) {
+            $("#divAdminClusterFenced").html("<b>This Primary node is fenced.</b> Node <b>" + htmlEncode(responseJSON.response.fencedByNodeName) + "</b> took over as the Primary node while this node was unreachable. This node no longer notifies or serves configuration to Secondary nodes, and changes made here will not reach the Cluster. Delete the Cluster on this node and join it to <b>" + htmlEncode(responseJSON.response.fencedByNodeName) + "</b> as a Secondary node.");
+            $("#divAdminClusterFenced").show();
+        }
+        else {
+            $("#divAdminClusterFenced").hide();
         }
 
         var tableHtmlRows = "";
@@ -157,6 +170,11 @@ function reloadAdminClusterView(responseJSON) {
                     break;
             }
 
+            if (responseJSON.response.clusterNodes[i].autoFailoverPauseRemainingSeconds > 0) {
+                var pausedUntil = moment().add(responseJSON.response.clusterNodes[i].autoFailoverPauseRemainingSeconds, "seconds");
+                nodeType += "<br /><span class=\"label label-warning\" style=\"display: inline-block; margin-top: 4px;\" title=\"Auto failover is paused on this node for planned maintenance.\">Failover Paused until " + pausedUntil.local().format("HH:mm") + "</span>";
+            }
+
             var clusterNodestate;
 
             switch (responseJSON.response.clusterNodes[i].state) {
@@ -179,8 +197,12 @@ function reloadAdminClusterView(responseJSON) {
 
             var version = "";
 
-            if (responseJSON.response.clusterNodes[i].version != null)
+            if (responseJSON.response.clusterNodes[i].version != null) {
                 version = "<br /><span style=\"font-size: 12px\">(v" + htmlEncode(responseJSON.response.clusterNodes[i].version) + ")</span>";
+
+                if ((selfNodeVersion != null) && (responseJSON.response.clusterNodes[i].version != selfNodeVersion))
+                    version += " <span class=\"label label-warning\" title=\"This node runs a different version than the node you are viewing from (v" + htmlEncode(selfNodeVersion) + ").\">Version Mismatch</span>";
+            }
 
             var upSince = "";
 
@@ -190,19 +212,24 @@ function reloadAdminClusterView(responseJSON) {
             var lastSeen = "";
             var lastSynced = "";
 
-            switch (responseJSON.response.clusterNodes[i].state) {
-                case "Self":
-                    if (responseJSON.response.clusterNodes[i].type == "Secondary") {
-                        if (responseJSON.response.clusterNodes[i].configLastSynced != null)
-                            lastSynced = moment(responseJSON.response.clusterNodes[i].configLastSynced).local().format("YYYY-MM-DD HH:mm") + "<br /><span style=\"font-size: 12px\">(" + moment(responseJSON.response.clusterNodes[i].configLastSynced).fromNow() + ")</span>";
-                    }
-                    break;
+            if (responseJSON.response.clusterNodes[i].state != "Self") {
+                if (responseJSON.response.clusterNodes[i].lastSeen != null)
+                    lastSeen = moment(responseJSON.response.clusterNodes[i].lastSeen).local().format("YYYY-MM-DD HH:mm") + "<br /><span style=\"font-size: 12px\">(" + moment(responseJSON.response.clusterNodes[i].lastSeen).fromNow() + ")</span>";
+            }
 
-                default:
-                    if (responseJSON.response.clusterNodes[i].lastSeen != null)
-                        lastSeen = moment(responseJSON.response.clusterNodes[i].lastSeen).local().format("YYYY-MM-DD HH:mm") + "<br /><span style=\"font-size: 12px\">(" + moment(responseJSON.response.clusterNodes[i].lastSeen).fromNow() + ")</span>";
+            if (responseJSON.response.clusterNodes[i].type == "Secondary") {
+                var nodeConfigLastSynced = responseJSON.response.clusterNodes[i].configLastSynced;
 
-                    break;
+                if (nodeConfigLastSynced != null) {
+                    lastSynced = moment(nodeConfigLastSynced).local().format("YYYY-MM-DD HH:mm") + "<br /><span style=\"font-size: 12px\">(" + moment(nodeConfigLastSynced).fromNow() + ")</span>";
+
+                    //last synced has seconds precision; compare at that precision
+                    if ((configLastModified != null) && (moment(configLastModified).startOf("second").valueOf() >= moment(nodeConfigLastSynced).valueOf()))
+                        lastSynced += "<br /><span class=\"label label-warning\" title=\"The Primary node has configuration changes that this node has not synced yet.\">Sync Pending</span>";
+                }
+                else if ((configLastModified != null) && (responseJSON.response.clusterNodes[i].state == "Connected") && (responseJSON.response.clusterNodes[i].version == selfNodeVersion)) {
+                    lastSynced = "<span class=\"label label-warning\">Never Synced</span>";
+                }
             }
 
             tableHtmlRows += "<tr id=\"trAdminClusterNode" + i + "\"><td>" + htmlEncode(responseJSON.response.clusterNodes[i].name) + version + "</td><td>" +
@@ -264,6 +291,21 @@ function reloadAdminClusterView(responseJSON) {
                 $("#btnClusterOptions").show();
                 $("#btnClusterLeave").hide();
                 $("#btnClusterDelete").show();
+
+                //maintenance pause is offered only when auto failover is on
+                if (responseJSON.response.autoFailoverEnabled && (responseJSON.response.autoFailoverPauseRemainingSeconds > 0)) {
+                    $("#btnClusterPauseFailover").hide();
+                    $("#btnClusterResumeFailover").show();
+                }
+                else if (responseJSON.response.autoFailoverEnabled) {
+                    $("#btnClusterPauseFailover").show();
+                    $("#btnClusterResumeFailover").hide();
+                }
+                else {
+                    $("#btnClusterPauseFailover").hide();
+                    $("#btnClusterResumeFailover").hide();
+                }
+
                 break;
 
             default:
@@ -271,6 +313,8 @@ function reloadAdminClusterView(responseJSON) {
                 $("#btnClusterOptions").show();
                 $("#btnClusterLeave").show();
                 $("#btnClusterDelete").hide();
+                $("#btnClusterPauseFailover").hide();
+                $("#btnClusterResumeFailover").hide();
                 break;
         }
 
@@ -281,6 +325,9 @@ function reloadAdminClusterView(responseJSON) {
         $("#divAdminClusterInitialize").show();
         $("#btnClusterResync").hide();
         $("#btnClusterOptions").hide();
+        $("#btnClusterPauseFailover").hide();
+        $("#btnClusterResumeFailover").hide();
+        $("#divAdminClusterFenced").hide();
         $("#btnClusterLeave").hide();
         $("#btnClusterDelete").hide();
 
@@ -801,6 +848,49 @@ function resyncCluster(objBtn) {
     });
 }
 
+function setClusterAutoFailoverPause(objBtn, minutes, successTitle, successMessage) {
+    var node = $("#optAdminClusterNode").val();
+
+    var btn = $(objBtn);
+    btn.button("loading");
+
+    HTTPRequest({
+        url: "api/admin/cluster/primary/pauseAutoFailover?minutes=" + encodeURIComponent(minutes) + "&node=" + encodeURIComponent(node),
+        token: sessionData.token,
+        success: function (responseJSON) {
+            btn.button("reset");
+            reloadAdminClusterView(responseJSON);
+            showAlert("success", successTitle, successMessage);
+        },
+        error: function () {
+            btn.button("reset");
+        },
+        invalidToken: function () {
+            btn.button("reset");
+            showPageLogin();
+        }
+    });
+}
+
+function pauseClusterAutoFailover(objBtn) {
+    var minutes = prompt("Pause auto failover for how many minutes? Use this before a planned reboot or maintenance of this Primary node.", "30");
+    if (minutes == null)
+        return;
+
+    minutes = minutes.trim();
+
+    if (!/^\d+$/.test(minutes) || (parseInt(minutes, 10) < 1) || (parseInt(minutes, 10) > 1440)) {
+        showAlert("warning", "Invalid!", "Please enter a whole number of minutes between 1 and 1440.");
+        return;
+    }
+
+    setClusterAutoFailoverPause(objBtn, minutes, "Failover Paused!", "Auto failover was paused for " + minutes + " minute(s). It reaches the other nodes within about 10 seconds, and the 'Failover Paused' badge on the successor node appears here within about a minute. Wait for that badge before rebooting this node.");
+}
+
+function resumeClusterAutoFailover(objBtn) {
+    setClusterAutoFailoverPause(objBtn, 0, "Failover Resumed!", "Auto failover was resumed.");
+}
+
 function showClusterOptionsModal() {
     var divClusterOptionsAlert = $("#divClusterOptionsAlert");
     var divClusterOptionsLoader = $("#divClusterOptionsLoader");
@@ -832,6 +922,23 @@ function showClusterOptionsModal() {
             $("#txtClusterOptionsHeartbeatRetryIntervalSeconds").attr("disabled", !isPrimaryNode);
             $("#txtClusterOptionsConfigRefreshIntervalSeconds").attr("disabled", !isPrimaryNode);
             $("#txtClusterOptionsConfigRetryIntervalSeconds").attr("disabled", !isPrimaryNode);
+            $("#chkClusterOptionsAutoFailoverEnabled").attr("disabled", !isPrimaryNode);
+            $("#optClusterOptionsAutoFailoverSuccessor").attr("disabled", !isPrimaryNode);
+            $("#txtClusterOptionsAutoFailoverTimeoutSeconds").attr("disabled", !isPrimaryNode);
+
+            var successorOptions = "<option value=\"\">None</option>";
+
+            for (var i = 0; i < responseJSON.response.clusterNodes.length; i++) {
+                if (responseJSON.response.clusterNodes[i].type == "Secondary")
+                    successorOptions += "<option>" + htmlEncode(responseJSON.response.clusterNodes[i].name) + "</option>";
+            }
+
+            $("#optClusterOptionsAutoFailoverSuccessor").html(successorOptions);
+            $("#optClusterOptionsAutoFailoverSuccessor").val(responseJSON.response.autoFailoverSuccessorNodeName == null ? "" : responseJSON.response.autoFailoverSuccessorNodeName);
+            $("#chkClusterOptionsAutoFailoverEnabled").prop("checked", responseJSON.response.autoFailoverEnabled == true);
+            $("#txtClusterOptionsAutoFailoverTimeoutSeconds").val(responseJSON.response.autoFailoverTimeoutSeconds == null ? 120 : responseJSON.response.autoFailoverTimeoutSeconds);
+            $("#txtClusterOptionsAutoFailoverWitnessAddresses").val(responseJSON.response.autoFailoverWitnessAddresses == null ? "" : responseJSON.response.autoFailoverWitnessAddresses.join(", "));
+            $("#txtClusterOptionsAutoFailoverWitnessAddresses").attr("disabled", !isPrimaryNode);
 
             if (isPrimaryNode)
                 $("#btnClusterOptionsSave").show();
@@ -891,6 +998,23 @@ function saveClusterOptions(objBtn) {
         return;
     }
 
+    var autoFailoverEnabled = $("#chkClusterOptionsAutoFailoverEnabled").prop("checked");
+    var autoFailoverSuccessorNodeName = $("#optClusterOptionsAutoFailoverSuccessor").val();
+    var autoFailoverTimeoutSeconds = $("#txtClusterOptionsAutoFailoverTimeoutSeconds").val();
+    var autoFailoverWitnessAddresses = $("#txtClusterOptionsAutoFailoverWitnessAddresses").val();
+
+    if (autoFailoverEnabled && ((autoFailoverSuccessorNodeName == null) || (autoFailoverSuccessorNodeName === ""))) {
+        showAlert("warning", "Missing!", "Please select a successor node to enable auto failover.", divClusterOptionsAlert);
+        $("#optClusterOptionsAutoFailoverSuccessor").trigger("focus");
+        return;
+    }
+
+    if (autoFailoverTimeoutSeconds === "") {
+        showAlert("warning", "Missing!", "Please enter a value for Failover Timeout.", divClusterOptionsAlert);
+        $("#txtClusterOptionsAutoFailoverTimeoutSeconds").trigger("focus");
+        return;
+    }
+
     var node = $("#optAdminClusterNode").val();
 
     var btn = $(objBtn);
@@ -899,6 +1023,7 @@ function saveClusterOptions(objBtn) {
     HTTPRequest({
         url: "api/admin/cluster/primary/setOptions?heartbeatRefreshIntervalSeconds=" + heartbeatRefreshIntervalSeconds + "&heartbeatRetryIntervalSeconds=" + heartbeatRetryIntervalSeconds
             + "&configRefreshIntervalSeconds=" + configRefreshIntervalSeconds + "&configRetryIntervalSeconds=" + configRetryIntervalSeconds
+            + "&autoFailoverEnabled=" + autoFailoverEnabled + "&autoFailoverSuccessorNodeName=" + encodeURIComponent(autoFailoverSuccessorNodeName == null ? "" : autoFailoverSuccessorNodeName) + "&autoFailoverTimeoutSeconds=" + encodeURIComponent(autoFailoverTimeoutSeconds) + "&autoFailoverWitnessAddresses=" + encodeURIComponent(autoFailoverWitnessAddresses)
             + "&node=" + encodeURIComponent(node),
         token: sessionData.token,
         success: function (responseJSON) {
