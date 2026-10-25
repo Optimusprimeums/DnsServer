@@ -498,6 +498,25 @@ namespace DnsServerCore.HttpApi
             return (httpResponse.Content.ReadAsStream(cancellationToken), httpResponse.Content.Headers.LastModified?.UtcDateTime ?? DateTime.UtcNow);
         }
 
+        public async Task<ClusterPrimaryReachability> GetClusterPrimaryReachabilityAsync(string candidateNodeName, CancellationToken cancellationToken = default)
+        {
+            if (!_loggedIn)
+                throw new HttpApiClientException("No active session exists. Please login and try again.");
+
+            Stream stream = await _httpClient.GetStreamAsync($"api/admin/cluster/primaryReachability?candidateNodeName={Uri.EscapeDataString(candidateNodeName)}", cancellationToken);
+
+            using JsonDocument jsonDoc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            JsonElement rootElement = jsonDoc.RootElement;
+
+            CheckResponseStatus(rootElement);
+
+            ClusterPrimaryReachability? reachability = rootElement.GetProperty("response").Deserialize<ClusterPrimaryReachability>(_serializerOptions);
+            if (reachability is null)
+                throw new HttpApiClientException("Invalid JSON response was received.");
+
+            return reachability;
+        }
+
         public async Task<ClusterInfo> LeaveClusterAsync(bool forceLeave = false, CancellationToken cancellationToken = default)
         {
             if (!_loggedIn)

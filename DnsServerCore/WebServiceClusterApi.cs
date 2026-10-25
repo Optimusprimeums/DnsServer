@@ -19,6 +19,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 using DnsServerCore.Auth;
 using DnsServerCore.Cluster;
+using DnsServerCore.HttpApi.Models;
 using Microsoft.AspNetCore.Http;
 using System;
 using System.Buffers.Text;
@@ -70,6 +71,30 @@ namespace DnsServerCore
                     jsonWriter.WriteNumber("heartbeatRetryIntervalSeconds", _dnsWebService._clusterManager.HeartBeatRetryIntervalSeconds);
                     jsonWriter.WriteNumber("configRefreshIntervalSeconds", _dnsWebService._clusterManager.ConfigRefreshIntervalSeconds);
                     jsonWriter.WriteNumber("configRetryIntervalSeconds", _dnsWebService._clusterManager.ConfigRetryIntervalSeconds);
+
+                    if (_dnsWebService._clusterManager.GetSelfNode().Type == ClusterNodeType.Primary)
+                        jsonWriter.WriteString("configLastModified", _dnsWebService._clusterManager.ConfigLastModified);
+
+                    jsonWriter.WriteBoolean("autoFailoverEnabled", _dnsWebService._clusterManager.AutoFailoverEnabled);
+                    jsonWriter.WriteString("autoFailoverSuccessorNodeName", _dnsWebService._clusterManager.AutoFailoverSuccessorNodeName);
+                    jsonWriter.WriteNumber("autoFailoverTimeoutSeconds", _dnsWebService._clusterManager.AutoFailoverTimeoutSeconds);
+
+                    jsonWriter.WriteStartArray("autoFailoverWitnessAddresses");
+
+                    if (_dnsWebService._clusterManager.AutoFailoverWitnessAddresses is not null)
+                    {
+                        foreach (IPAddress witnessAddress in _dnsWebService._clusterManager.AutoFailoverWitnessAddresses)
+                            jsonWriter.WriteStringValue(witnessAddress.ToString());
+                    }
+
+                    jsonWriter.WriteEndArray();
+
+                    jsonWriter.WriteNumber("autoFailoverPauseRemainingSeconds", _dnsWebService._clusterManager.AutoFailoverPauseRemainingSeconds);
+
+                    jsonWriter.WriteBoolean("fenced", _dnsWebService._clusterManager.Fenced);
+
+                    if (_dnsWebService._clusterManager.Fenced)
+                        jsonWriter.WriteString("fencedByNodeName", _dnsWebService._clusterManager.FencedByNodeName);
 
                     WriteClusterNodes(jsonWriter);
                 }
@@ -137,12 +162,6 @@ namespace DnsServerCore
                     {
                         jsonWriter.WriteString("version", clusterNode.Version);
                         jsonWriter.WriteString("upSince", clusterNode.UpSince);
-
-                        if (clusterNode.Type == ClusterNodeType.Secondary)
-                        {
-                            if (_dnsWebService._clusterManager.ConfigLastSynced != default)
-                                jsonWriter.WriteString("configLastSynced", _dnsWebService._clusterManager.ConfigLastSynced);
-                        }
                     }
                     else
                     {
@@ -155,6 +174,13 @@ namespace DnsServerCore
                         if (clusterNode.LastSeen != default)
                             jsonWriter.WriteString("lastSeen", clusterNode.LastSeen);
                     }
+
+                    if ((clusterNode.Type == ClusterNodeType.Secondary) && (clusterNode.ConfigLastSynced != default))
+                        jsonWriter.WriteString("configLastSynced", clusterNode.ConfigLastSynced);
+
+                    int pauseRemainingSeconds = clusterNode.AutoFailoverPauseRemainingSeconds;
+                    if (pauseRemainingSeconds > 0)
+                        jsonWriter.WriteNumber("autoFailoverPauseRemainingSeconds", pauseRemainingSeconds);
 
                     jsonWriter.WriteEndObject();
                 }
@@ -428,6 +454,48 @@ namespace DnsServerCore
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] Server configuration was transferred successfully.");
             }
 
+            public void GetPrimaryReachability(HttpContext context)
+            {
+                User sessionUser = _dnsWebService.GetSessionUser(context);
+
+                if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.Delete))
+                    throw new DnsWebServiceException("Access was denied.");
+
+                string candidateNodeName = context.Request.GetQueryOrForm("candidateNodeName", null);
+
+                ClusterPrimaryReachability reachability = _dnsWebService._clusterManager.GetPrimaryReachability(candidateNodeName);
+
+                Utf8JsonWriter jsonWriter = context.GetCurrentJsonWriter();
+
+                jsonWriter.WriteNumber("primaryNodeId", reachability.PrimaryNodeId);
+                jsonWriter.WriteBoolean("primaryReachable", reachability.PrimaryReachable);
+
+                if (reachability.PrimaryLastSeen is null)
+                    jsonWriter.WriteNull("primaryLastSeen");
+                else
+                    jsonWriter.WriteString("primaryLastSeen", reachability.PrimaryLastSeen.Value);
+            }
+
+            public void PauseAutoFailover(HttpContext context)
+            {
+                User sessionUser = _dnsWebService.GetSessionUser(context);
+
+                if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.Modify))
+                    throw new DnsWebServiceException("Access was denied.");
+
+                int minutes = context.Request.GetQueryOrForm("minutes", int.Parse);
+
+                _dnsWebService._clusterManager.PauseAutoFailover(minutes);
+
+                if (minutes == 0)
+                    _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] Cluster auto failover was resumed.");
+                else
+                    _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] Cluster auto failover was paused for " + minutes + " minute(s).");
+
+                Utf8JsonWriter jsonWriter = context.GetCurrentJsonWriter();
+                WriteClusterState(jsonWriter);
+            }
+
             public void SetClusterOptions(HttpContext context)
             {
                 User sessionUser = _dnsWebService.GetSessionUser(context);
@@ -442,7 +510,34 @@ namespace DnsServerCore
                 ushort configRefreshIntervalSeconds = request.GetQueryOrForm("configRefreshIntervalSeconds", ushort.Parse, _dnsWebService._clusterManager.ConfigRefreshIntervalSeconds);
                 ushort configRetryIntervalSeconds = request.GetQueryOrForm("configRetryIntervalSeconds", ushort.Parse, _dnsWebService._clusterManager.ConfigRetryIntervalSeconds);
 
+                bool autoFailoverEnabled = request.GetQueryOrForm("autoFailoverEnabled", bool.Parse, _dnsWebService._clusterManager.AutoFailoverEnabled);
+                string autoFailoverSuccessorNodeName = request.GetQueryOrForm("autoFailoverSuccessorNodeName", _dnsWebService._clusterManager.AutoFailoverSuccessorNodeName);
+                ushort autoFailoverTimeoutSeconds = request.GetQueryOrForm("autoFailoverTimeoutSeconds", ushort.Parse, _dnsWebService._clusterManager.AutoFailoverTimeoutSeconds);
+
+                //empty value clears witnesses (use default gateway); parameter missing keeps current list
+                IReadOnlyList<IPAddress> autoFailoverWitnessAddresses = _dnsWebService._clusterManager.AutoFailoverWitnessAddresses;
+
+                string witnessValue = request.QueryOrForm("autoFailoverWitnessAddresses");
+                if (witnessValue is not null)
+                {
+                    string[] parts = witnessValue.Split([',', ' ', '\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    IPAddress[] parsed = new IPAddress[parts.Length];
+
+                    for (int i = 0; i < parts.Length; i++)
+                    {
+                        if (!IPAddress.TryParse(parts[i], out parsed[i]))
+                            throw new DnsWebServiceException("Invalid witness IP address: " + parts[i]);
+                    }
+
+                    autoFailoverWitnessAddresses = parsed;
+                }
+
+                //validate auto failover against the new heartbeat interval before applying anything
+                _dnsWebService._clusterManager.ValidateAutoFailoverOptions(autoFailoverEnabled, autoFailoverSuccessorNodeName, autoFailoverTimeoutSeconds, heartbeatRefreshIntervalSeconds);
+                _dnsWebService._clusterManager.ValidateWitnessAddresses(autoFailoverWitnessAddresses);
+
                 _dnsWebService._clusterManager.UpdateClusterOptions(heartbeatRefreshIntervalSeconds, heartbeatRetryIntervalSeconds, configRefreshIntervalSeconds, configRetryIntervalSeconds);
+                _dnsWebService._clusterManager.UpdateAutoFailoverOptions(autoFailoverEnabled, autoFailoverSuccessorNodeName, autoFailoverTimeoutSeconds, autoFailoverWitnessAddresses);
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] Cluster (" + _dnsWebService._clusterManager.ClusterDomain + ") options were updated successfully.");
 

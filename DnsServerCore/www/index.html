@@ -3352,6 +3352,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                                             <div id="divAdminClusterLoader" style="margin-top: 10px; height: 350px;"></div>
 
                                             <div id="divAdminClusterView" style="margin-top: 10px;">
+                                                <div id="divAdminClusterFenced" class="alert alert-danger" style="display: none;"></div>
                                                 <div class="form-inline pull-right" style="padding: 2px 0px;">
                                                     <div id="divAdminClusterInitialize" class="btn-group">
                                                         <button type="button" class="btn btn-primary dropdown-toggle" style="padding: 2px 0px; width: 100px;" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
@@ -3364,6 +3365,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                                                     </div>
 
                                                     <button id="btnClusterResync" type="button" class="btn btn-primary" style="padding: 2px 0px; width: 100px;" onclick="resyncCluster(this);" data-loading-text="Resyncing...">Resync</button>
+                                                    <button id="btnClusterPauseFailover" type="button" class="btn btn-warning" style="padding: 2px 0px; width: 120px; display: none;" data-loading-text="Pausing..." onclick="pauseClusterAutoFailover(this);">Pause Failover</button>
+                                                    <button id="btnClusterResumeFailover" type="button" class="btn btn-default" style="padding: 2px 0px; width: 120px; display: none;" data-loading-text="Resuming..." onclick="resumeClusterAutoFailover(this);">Resume Failover</button>
                                                     <button id="btnClusterOptions" type="button" class="btn btn-primary" style="padding: 2px 0px; width: 100px;" onclick="showClusterOptionsModal();">Options</button>
                                                     <button id="btnClusterLeave" type="button" class="btn btn-warning" style="padding: 2px 0px; width: 100px;" onclick="showLeaveClusterModal();">Leave Cluster</button>
                                                     <button id="btnClusterDelete" type="button" class="btn btn-danger" style="padding: 2px 0px; width: 100px;" onclick="showDeleteClusterModal();">Delete Cluster</button>
@@ -7390,6 +7393,43 @@ MII...
                                         <span>seconds (valid range 30-3600; default 60)</span>
                                     </div>
                                     <div style="padding-top: 5px;">The interval in seconds in which the DNS Server must retry the configuration refresh process for the Primary node in case of a failure.</div>
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <div class="col-sm-offset-4 col-sm-7">
+                                    <div class="checkbox">
+                                        <label>
+                                            <input id="chkClusterOptionsAutoFailoverEnabled" type="checkbox"> Enable Auto Failover
+                                        </label>
+                                    </div>
+                                    <div style="padding-top: 5px;">When enabled, the successor Secondary node promotes itself to Primary if the Primary node has been unreachable for the timeout and no longer accepts connections. With 3 or more nodes, a majority of nodes must agree; with 2 nodes, the successor must be able to reach the witness. The former Primary is fenced when it returns and must be rejoined as a Secondary node.</div>
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="optClusterOptionsAutoFailoverSuccessor" class="col-sm-4 control-label">Successor Node</label>
+                                <div class="col-sm-7">
+                                    <select id="optClusterOptionsAutoFailoverSuccessor" class="form-control"></select>
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="txtClusterOptionsAutoFailoverTimeoutSeconds" class="col-sm-4 control-label">Failover Timeout</label>
+                                <div class="col-sm-7">
+                                    <div>
+                                        <input id="txtClusterOptionsAutoFailoverTimeoutSeconds" type="number" class="form-control" placeholder="seconds" maxlength="5" style="width: 100px; display: inline;">
+                                        <span>seconds (valid range 60-3600; default 120)</span>
+                                    </div>
+                                    <div style="padding-top: 5px;">How long the Primary node must be unreachable before the successor node takes over. Must be at least twice the heartbeat refresh interval. Set it longer than a typical reboot of the Primary node to avoid a failover during planned maintenance.</div>
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="txtClusterOptionsAutoFailoverWitnessAddresses" class="col-sm-4 control-label">Witness Addresses</label>
+                                <div class="col-sm-7">
+                                    <input id="txtClusterOptionsAutoFailoverWitnessAddresses" type="text" class="form-control" placeholder="default gateway">
+                                    <div style="padding-top: 5px;">Used only in 2-node Clusters. One or more comma separated IP addresses of an always-on device that both nodes can reach, such as your router. The successor takes over only if it can reach a witness, which proves it is not the isolated node. Leave empty to use the successor's default gateway.</div>
                                 </div>
                             </div>
                         </div>

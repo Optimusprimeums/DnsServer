@@ -31,6 +31,12 @@ namespace DnsServerCore.HttpApi.Models
         public ushort ConfigRefreshIntervalSeconds { get; set; }
         public ushort ConfigRetryIntervalSeconds { get; set; }
         public DateTime? ConfigLastSynced { get; set; }
+        public DateTime? ConfigLastModified { get; set; }
+        public bool AutoFailoverEnabled { get; set; }
+        public string? AutoFailoverSuccessorNodeName { get; set; }
+        public ushort AutoFailoverTimeoutSeconds { get; set; }
+        public string[]? AutoFailoverWitnessAddresses { get; set; }
+        public int? AutoFailoverPauseRemainingSeconds { get; set; }
         public List<ClusterNodeInfo>? ClusterNodes { get; set; }
 
         public class ClusterNodeInfo
@@ -44,6 +50,8 @@ namespace DnsServerCore.HttpApi.Models
             public string? Version { get; set; }
             public DateTime? UpSince { get; set; }
             public DateTime? LastSeen { get; set; }
+            public DateTime? ConfigLastSynced { get; set; }
+            public int? AutoFailoverPauseRemainingSeconds { get; set; }
         }
     }
 }
