@@ -1,0 +1,119 @@
+# CI for optimusprime-nn/DnsServer (fork of TechnitiumSoftware/DnsServer).
+# Steps follow build.md. TechnitiumLibrary (upstream, not forked) is checked out next to
+# DnsServer because the projects reference ..\TechnitiumLibrary\bin\*.dll.
+# There are no test projects, so this is a build check plus artifacts:
+#   linux   - library + all 33 projects in DnsServer.sln (Windows ones compiled with
+#             EnableWindowsTargeting) + the DnsServerApp publish the Dockerfile uses
+#   docker  - builds the image from that publish (not pushed anywhere)
+#   windows - tray app + Windows service published to DnsServerWindowsSetup\publish,
+#             then the Inno Setup installer, on the self-hosted Windows runner
+name: CI
+
+on:
+  push:            # all branches: work happens on cluster-improvements, dhcp-failover, ...
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Build (Linux, self-hosted)
+    runs-on: [self-hosted, linux, big]
+    container:
+      image: mcr.microsoft.com/dotnet/sdk:10.0
+      env:
+        DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+        DOTNET_NOLOGO: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: DnsServer
+      - uses: actions/checkout@v4
+        with:
+          repository: TechnitiumSoftware/TechnitiumLibrary
+          path: TechnitiumLibrary
+
+      - name: Build TechnitiumLibrary
+        run: dotnet build TechnitiumLibrary/TechnitiumLibrary.sln -c Release
+
+      - name: Build every project in DnsServer.sln
+        run: dotnet build DnsServer/DnsServer.sln -c Release -p:EnableWindowsTargeting=true
+
+      - name: Publish DnsServerApp (what the Dockerfile copies)
+        run: dotnet publish DnsServer/DnsServerApp/DnsServerApp.csproj -c Release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dnsserverapp-publish
+          path: DnsServer/DnsServerApp/bin/Release/publish/
+          if-no-files-found: error
+
+  docker:
+    name: Docker image (Linux, self-hosted)
+    needs: linux
+    runs-on: [self-hosted, linux, big]
+    # Talks to the VM's Docker through its socket; the image is built, not pushed.
+    container:
+      image: docker:cli
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dnsserverapp-publish
+          path: DnsServerApp/bin/Release/publish
+      - name: Build image
+        run: docker build -t "technitium-dns-ci:${GITHUB_SHA::12}" .
+      - name: Remove image
+        if: always()
+        run: docker image rm -f "technitium-dns-ci:${GITHUB_SHA::12}" || true
+
+  windows:
+    name: Windows installer (self-hosted)
+    runs-on: [self-hosted, windows, msvc]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: DnsServer
+          clean: true
+      - uses: actions/checkout@v4
+        with:
+          repository: TechnitiumSoftware/TechnitiumLibrary
+          path: TechnitiumLibrary
+          clean: true
+
+      - name: Build TechnitiumLibrary
+        run: dotnet build TechnitiumLibrary\TechnitiumLibrary.sln -c Release
+
+      # Same output folder as the projects' Visual Studio publish profiles, but with an
+      # explicit -o: the tray app's FolderProfile.pubxml still says net9.0-windows7.0.
+      - name: Publish tray app + Windows service
+        run: |
+          $out = "$env:GITHUB_WORKSPACE\DnsServer\DnsServerWindowsSetup\publish"
+          if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+          dotnet publish DnsServer\DnsServerSystemTrayApp\DnsServerSystemTrayApp.csproj -c Release -o $out
+          if ($LASTEXITCODE) { throw "tray app publish failed" }
+          dotnet publish DnsServer\DnsServerWindowsService\DnsServerWindowsService.csproj -c Release -o $out
+          if ($LASTEXITCODE) { throw "service publish failed" }
+
+      - name: Build installer (Inno Setup)
+        working-directory: DnsServer\DnsServerWindowsSetup
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" DnsServerSetup.iss
+          if ($LASTEXITCODE) { throw "ISCC failed ($LASTEXITCODE)" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dnsserver-windows-setup
+          path: DnsServer/DnsServerWindowsSetup/Release/*.exe
+          if-no-files-found: error
