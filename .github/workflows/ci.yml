@@ -2,8 +2,10 @@
 # Steps follow build.md. TechnitiumLibrary (upstream, not forked) is checked out next to
 # DnsServer because the projects reference ..\TechnitiumLibrary\bin\*.dll.
 # There are no test projects, so this is a build check plus artifacts:
-#   linux   - library + all 33 projects in DnsServer.sln (Windows ones compiled with
-#             EnableWindowsTargeting) + the DnsServerApp publish the Dockerfile uses
+#   linux   - the library parts DnsServer uses + 32 of the 33 projects in DnsServer.sln
+#             (tray app compiled with EnableWindowsTargeting; the Windows service needs
+#             Net.Firewall's COM reference, so it's built by the windows job) + the
+#             DnsServerApp publish the Dockerfile uses
 #   docker  - builds the image from that publish (not pushed anywhere)
 #   windows - tray app + Windows service published to DnsServerWindowsSetup\publish,
 #             then the Inno Setup installer, on the self-hosted Windows runner
@@ -39,11 +41,21 @@ jobs:
           repository: TechnitiumSoftware/TechnitiumLibrary
           path: TechnitiumLibrary
 
-      - name: Build TechnitiumLibrary
-        run: dotnet build TechnitiumLibrary/TechnitiumLibrary.sln -c Release
+      # Only the library projects DnsServer references (their own project references
+      # pull in TechnitiumLibrary and .IO). Not the whole .sln: TechnitiumLibrary.Net.Firewall
+      # has a COM reference, which the dotnet CLI's MSBuild cannot resolve (MSB4803).
+      - name: Build TechnitiumLibrary (the parts DnsServer uses)
+        run: |
+          for p in ByteTree Net Net.Mail Security.OTP; do
+            dotnet build "TechnitiumLibrary/TechnitiumLibrary.$p/TechnitiumLibrary.$p.csproj" -c Release
+          done
 
-      - name: Build every project in DnsServer.sln
-        run: dotnet build DnsServer/DnsServer.sln -c Release -p:EnableWindowsTargeting=true
+      # DnsServerWindowsService is the only project that needs Net.Firewall, so it is
+      # left out here (only in this CI checkout) and built by the windows job instead.
+      - name: Build every other project in DnsServer.sln
+        run: |
+          dotnet sln DnsServer/DnsServer.sln remove DnsServer/DnsServerWindowsService/DnsServerWindowsService.csproj
+          dotnet build DnsServer/DnsServer.sln -c Release -p:EnableWindowsTargeting=true
 
       - name: Publish DnsServerApp (what the Dockerfile copies)
         run: dotnet publish DnsServer/DnsServerApp/DnsServerApp.csproj -c Release
@@ -92,8 +104,23 @@ jobs:
           path: TechnitiumLibrary
           clean: true
 
-      - name: Build TechnitiumLibrary
-        run: dotnet build TechnitiumLibrary\TechnitiumLibrary.sln -c Release
+      - name: Build TechnitiumLibrary (the parts DnsServer uses)
+        run: |
+          foreach ($p in 'ByteTree', 'Net', 'Net.Mail', 'Security.OTP') {
+            dotnet build "TechnitiumLibrary\TechnitiumLibrary.$p\TechnitiumLibrary.$p.csproj" -c Release
+            if ($LASTEXITCODE) { throw "TechnitiumLibrary.$p build failed" }
+          }
+
+      # The Windows service needs Net.Firewall, whose COM reference (Windows Firewall
+      # API) only Visual Studio's MSBuild can resolve, not the dotnet CLI's (MSB4803).
+      # The VS Build Tools installed by setup-windows-ci.ps1 provide it.
+      - name: Build TechnitiumLibrary.Net.Firewall (Visual Studio MSBuild)
+        run: |
+          $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+          if (-not $msbuild) { throw "Visual Studio MSBuild not found (VS Build Tools missing?)" }
+          & $msbuild TechnitiumLibrary\TechnitiumLibrary.Net.Firewall\TechnitiumLibrary.Net.Firewall.csproj -restore -p:Configuration=Release -nologo -v:minimal
+          if ($LASTEXITCODE) { throw "Net.Firewall build failed" }
 
       # Same output folder as the projects' Visual Studio publish profiles, but with an
       # explicit -o: the tray app's FolderProfile.pubxml still says net9.0-windows7.0.
