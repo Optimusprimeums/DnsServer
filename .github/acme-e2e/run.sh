@@ -6,7 +6,7 @@
 #
 # Scenarios, each ending with an HTTPS request that verifies the full chain and host name:
 #   1. Zone on this server: dns.acme.test + *.acme.test (two TXT values at one name)
-#   2. CNAME delegation: _acme-challenge.dns.other.test -> a name in acme.test
+#   2. CNAME delegation: _acme-challenge.dns.other.test -> _acme-challenge.delegated.acme.test
 #   3. RFC 2136 with a TSIG key scoped to one record: dns.rfc.test
 #      (reuses the ACME account from scenario 1, i.e. the renewal code path)
 #
@@ -181,7 +181,7 @@ echo "   CA name 'pebble' -> $PEBBLE_IP published in a local zone"
 api zones/create zone acme.test type Primary >/dev/null
 api zones/records/add zone acme.test domain ns1.acme.test type A ipAddress "$DNS_IP" ttl 60 >/dev/null
 api zones/create zone other.test type Primary >/dev/null
-api zones/records/add zone other.test domain _acme-challenge.dns.other.test type CNAME cname delegated.acme.test ttl 60 >/dev/null
+api zones/records/add zone other.test domain _acme-challenge.dns.other.test type CNAME cname _acme-challenge.delegated.acme.test ttl 60 >/dev/null
 api zones/create zone rfc.test type Primary >/dev/null
 
 ########################################################################################################
@@ -232,7 +232,7 @@ issue_and_check "dns.rfc.test"
 check_https dns.rfc.test
 
 # challenge records must be cleaned up by every provider
-for name in _acme-challenge.dns.acme.test delegated.acme.test _acme-challenge.dns.rfc.test; do
+for name in _acme-challenge.dns.acme.test _acme-challenge.delegated.acme.test _acme-challenge.dns.rfc.test; do
     left="$(docker exec "$DNS" sh -c "command -v dig >/dev/null && dig +short @127.0.0.1 $name TXT" || true)"
     [ -z "$left" ] || { echo "leftover TXT at $name: $left"; exit 1; }
 done

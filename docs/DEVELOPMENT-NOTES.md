@@ -258,6 +258,16 @@ Push builds are never cancelled mid-release (`cancel-in-progress` is on for PRs 
 | 20 | ACME: low findings (deleted account, shutdown, SSRF via directoryInfo, `javascript:` terms link, selector injection, test timeout, restart rule) | independent review | All fixed |
 | 21 | ACME PR initially conflicted with the DHCP PR (same anchors in DnsWebService) | cherry-pick onto fork/main | Moved ACME anchors; all three PR branches verified to merge in two orders and build |
 | 22 | ACME e2e first run: Technitium couldn't resolve the Docker name `pebble` (it resolves outbound names via itself) | first CI run | Publish `pebble` in a local zone in the test |
+| 23 | DHCP: a DHCP-Modify user could repoint the partner URL and the saved administrator token was sent there | security audit (2026-10-27) | `failover/set` needs Administration: Delete; token dropped when the URL's origin changes |
+| 24 | DHCP: snapshot scope names weren't validated (path traversal on scope files); unbounded snapshot size | security audit | Name/length/count checks, 64 MB cap |
+| 25 | DHCP: plain HTTP and "ignore certificate errors" in direct mode | security audit | HTTPS required; SHA-256 certificate pinning, v2 configs pin on first use; `dhcp-failover.config` v3 |
+| 26 | DHCP: a Standby in PartnerDown kept serving when the Primary answered with an error | security audit | Steps down unless the Primary says it isn't serving |
+| 27 | Cluster: one node's report permanently fenced the Primary | security audit | Primary term (cluster.config v4); fence only when the new Primary itself reports a higher term |
+| 28 | ACME: CA URLs unrestricted and error bodies echoed into the log (SSRF with readback); stack traces on the page | security audit | Same-origin https for all CA URLs, problem detail only, 1 MB limit, message only |
+| 29 | ACME: local zone provider bypassed zone permissions; CNAME target taken from unauthenticated DNS | security audit | Needs Zones: Modify; it only writes names starting with `_acme-challenge.` (other providers unchanged, so existing acme-dns style delegations keep renewing) |
+| 30 | CI: release job on persistent self-hosted runners; no checksum/provenance; actions pinned by tag | security audit | Release on ubuntu-latest; SHA-256 checked by the installer + SHA256SUMS + provenance attestation (made in the GitHub-hosted release job, so no OIDC/attestation rights on self-hosted runners); actions pinned by commit SHA (also in `ci.yml`) |
+| 31 | My first cut of #27 wrote `cluster.config` v4 without the term, so the file couldn't be read back | review of the fixes | Term written; caught before push |
+| 32 | My first cut of #26 could drop leases the Standby issued (step-down on any HTTP error, then mirror without hand-back) | review of the fixes | Step down only on a valid "serving" status; leases owed to the Primary are handed back before any mirror |
 
 ## 7. Verification status
 
@@ -274,6 +284,8 @@ Push builds are never cancelled mid-release (`cancel-in-progress` is on for PRs 
 - ✔ **ACME verified against a real CA:** Let's Encrypt with Cloudflare DNS-01; certificates issued on ns1 and ns2.
 
 ## 8. Open items
+
+- Security audit 2026-10-27, left for the repo owner: runner group not available to public repositories (or ephemeral runners); tag ruleset for `v*` / `fork-latest` and branch protection on `fork/main`; `ci.yml` runs fork PRs on self-hosted runners (a same-repo guard as in build.yml would be defence in depth). Low findings not fixed yet: replicated lease validation, partner endpoints accepting any admin, cluster vote generation, Modify arming auto failover, witness list validation on Secondaries, ACME issued-certificate checks, testDns01 serialization, GHCR push before e2e.
 
 - Test on the two homelab servers (ns2 + partner). Then fill in the "Testing" rows of the PR descriptions.
 - ACME on ns2: Let's Encrypt staging with the Cloudflare provider, then production.

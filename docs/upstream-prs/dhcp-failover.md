@@ -1,7 +1,7 @@
 # PR: DHCP failover (hot-standby) between two DNS servers
 
 **Branch:** `optimusprime-nn/DnsServer:upstream/dhcp-failover` → **`TechnitiumSoftware/DnsServer:develop`**
-**Commit:** single commit, 14 files, +2135 / −6. Independent of the cluster improvements PR and the ACME PR (#2261); they merge cleanly in any order.
+**Commits:** 2 commits (the feature, then security hardening from a review), 15 files. Independent of the cluster improvements PR and the ACME PR (#2261); they merge cleanly in any order.
 
 ---
 
@@ -53,7 +53,10 @@ Expired leases aren't replicated, because each server expires them by time. In-f
 ### Safety decisions (and why)
 
 - **Short leases while the Standby serves.** In `PartnerDown`, `Scope.GetLeaseTime()` is capped at the max client lead time (default 1800 s). If the Primary was actually alive (split brain), conflicting leases expire quickly and clients renew soon after the Primary returns.
-- **A partner that answers is alive.** If the partner returns *any* HTTP/API response, even an error such as an invalid token, failover disabled or a role mismatch, the Standby treats it as alive and never escalates to `PartnerDown`. Without this, a revoked token or a half-configured pair would start a second DHCP server while the Primary is still running.
+- **A partner that answers is alive.** If the partner returns *any* HTTP/API response, even an error such as an invalid token, failover disabled or a role mismatch, the Standby treats it as alive and never escalates to `PartnerDown`. Without this, a revoked token or a half-configured pair would start a second DHCP server while the Primary is still running. For the same reason, a Standby already in `PartnerDown` stops serving when the Primary answers again but isn't working as its partner (unless the Primary reports it isn't serving), and logs a warning.
+- **Failover settings need administrator rights.** `failover/set` requires Administration: Delete as well as DhcpServer: Modify, because the settings hold an administrator token for the partner and decide which server hands out addresses. The saved token is only reused while the partner URL's scheme, host and port stay the same, so it can't be redirected to another server.
+- **HTTPS only, with optional pinning.** Direct mode requires an `https://` partner URL. Instead of an "ignore certificate errors" option, a partner with a self-signed certificate is trusted by its SHA-256 fingerprint; the status shows the fingerprint of an untrusted certificate the partner presented, so it can be checked and pinned.
+- **Snapshots are untrusted input.** Scope names in a received snapshot are validated (they become file names), counts and lengths are checked, and a snapshot is limited to 64 MB.
 - **Hand-back without losing leases.** Before leaving `PartnerDown`, the Standby pushes **all** its leases to the Primary, then switches to passive and mirrors. Leases issued during the outage survive, even if individual pushes were lost.
 - **The Primary owns scope settings.** In this mode the Standby's DHCP scope and lease edit endpoints (`scopes/set`, `addReservedLease`, `removeReservedLease`, `enable`, `disable`, `delete`, `leases/remove`, `convertToReserved`, `convertToDynamic`) return an error telling the user to make the change on the Primary. Otherwise the next mirror would silently overwrite those edits.
 - **Settings change detection without byte-for-byte comparison.** `ConcurrentDictionary` iteration order can differ between servers, so the Standby compares the Primary's reported settings hash with the hash it recorded at its last sync, rather than with a hash of its own scopes. That avoids endless resyncs.
@@ -79,7 +82,7 @@ The web console has a new **DHCP > Failover** tab with live status for this serv
 | Endpoint | Permission | Purpose |
 |---|---|---|
 | `GET/POST /api/dhcp/failover/get` | DhcpServer: View | Settings, local state, partner state, available Cluster nodes |
-| `GET/POST /api/dhcp/failover/set` | DhcpServer: Modify | `enabled`, `role`, `partnerMode` (`Direct`/`Cluster`), `partnerUrl`, `partnerApiToken` (empty keeps the saved token), `partnerIgnoreCertificateErrors`, `partnerNodeName`, `heartbeatIntervalSeconds`, `partnerDownDelaySeconds`, `maxClientLeadTimeSeconds` |
+| `GET/POST /api/dhcp/failover/set` | DhcpServer: Modify **and** Administration: Delete | `enabled`, `role`, `partnerMode` (`Direct`/`Cluster`), `partnerUrl` (https only), `partnerApiToken` (empty keeps the saved token for the same partner), `partnerCertificateFingerprint` (SHA-256, only for a self-signed certificate), `partnerNodeName`, `heartbeatIntervalSeconds`, `partnerDownDelaySeconds`, `maxClientLeadTimeSeconds` |
 | `GET /api/admin/cluster/dhcp/status` | Administration: Delete | Server-to-server heartbeat |
 | `GET /api/admin/cluster/dhcp/snapshot` | Administration: Delete | Binary snapshot (raw stream, same middleware path as `transferConfig`) |
 | `POST /api/admin/cluster/dhcp/leaseUpdates` | Administration: Delete | Binary lease updates (`application/octet-stream`) |
@@ -108,7 +111,7 @@ The server-to-server endpoints follow the existing cluster API's convention: an 
 - **Off by default.** With failover disabled, `IsServing` is `true` and `LeaseTimeLimit` is `0`, so DHCP behaves exactly as before.
 - No changes to the scope file format, the config backup format or the existing API responses.
 - `Scope.WriteTo` gains an optional parameter, which is source-compatible.
-- New config file `dhcp-failover.config`. Older versions ignore it.
+- New config file `dhcp-failover.config` (format version 3). Older versions ignore it.
 - Pairing direct with Cluster: both modes use the same endpoints. Only how the partner is reached differs.
 
 ## Testing

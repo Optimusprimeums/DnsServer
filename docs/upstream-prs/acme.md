@@ -1,7 +1,7 @@
 # PR: Automatic TLS certificates with ACME (DNS-01)
 
 **Branch:** `optimusprime-nn/DnsServer:upstream/acme` → **`TechnitiumSoftware/DnsServer:develop`**
-**Commits:** 5 commits, 11 files, about +3000 lines. It's independent of the DHCP failover and cluster improvements PRs; all three merge cleanly in any order.
+**Commits:** 6 commits (the last is security hardening from a review), 11 files, about +3050 lines. It's independent of the DHCP failover and cluster improvements PRs; all three merge cleanly in any order.
 
 ---
 
@@ -23,7 +23,8 @@ It's off by default, and nothing changes until an admin enables it.
   1. **Zone on this server:** a Primary zone; no credentials needed.
   2. **RFC 2136:** dynamic update, signed with a TSIG key chosen from Settings > TSIG. Works with BIND, PowerDNS, Knot, Windows DNS or another Technitium server, including a Cluster Primary.
   3. **Cloudflare:** an API token with Zone > DNS > Edit.
-- **CNAME delegation:** `_acme-challenge` CNAMEs are followed and the record is published at the target. A domain hosted at any provider can delegate just its challenge name to a zone this server controls.
+- **CNAME delegation:** `_acme-challenge` CNAMEs are followed and the record is published at the target (for the local zone provider the target must itself start with `_acme-challenge.`). A domain hosted at any provider can delegate just its challenge name to a zone this server controls.
+- **Untrusted CA responses:** every URL the CA hands out must be https on the directory's own origin, error bodies are never echoed (only the truncated ACME problem detail), and responses are limited to 1 MB. Stack traces go to the server log, not the page.
 - **Propagation check:** the server asks the zone's **public** authoritative name servers directly before asking the CA to validate. It finds them through configurable public resolvers, so a local split-horizon copy of the zone doesn't hide the public view.
   - Servers that don't respond at all, such as IPv6 servers on a network without IPv6, are skipped.
   - If none respond, which happens when there's no NAT hairpin, it logs a warning and lets the CA validate.
@@ -70,7 +71,7 @@ It's off by default, and nothing changes until an admin enables it.
 | Endpoint | Permission |
 |---|---|
 | `/api/settings/acme/get` | Settings: View |
-| `/api/settings/acme/set` | Settings: Modify |
+| `/api/settings/acme/set` | Settings: Modify (+ Zones: Modify for the local zone provider, also for `request` and `testDns01`) |
 | `/api/settings/acme/directoryInfo` | Settings: Modify (the server fetches an admin-supplied URL) |
 | `/api/settings/acme/request` | Settings: Modify |
 | `/api/settings/acme/testDns01` | Settings: Modify |

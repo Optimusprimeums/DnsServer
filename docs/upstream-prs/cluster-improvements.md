@@ -1,7 +1,7 @@
 # PR: Cluster improvements: automatic Primary failover, health view, missed-notify catch-up
 
 **Branch:** `optimusprime-nn/DnsServer:upstream/cluster-improvements` → **`TechnitiumSoftware/DnsServer:develop`**
-**Commit:** single commit, 10 files, +1145 / −21. Independent of the DHCP failover PR; the two merge cleanly in either order.
+**Commits:** 2 commits (the feature, then a fencing fix from a security review), 10 files. Independent of the DHCP failover PR; the two merge cleanly in either order.
 
 ---
 
@@ -119,9 +119,11 @@ So if an administrator changes the successor just before the Primary fails, node
   - `GET /api/admin/cluster/primaryReachability?candidateNodeName=` (Administration: Delete; used between nodes);
   - `GET/POST /api/admin/cluster/primary/pauseAutoFailover?minutes=` (Administration: Modify).
 - **HttpApi models:** `ClusterInfo` gains the fields above. New `ClusterPrimaryReachability`.
-- **`cluster.config` format version 3** (reads 1, 2 and 3):
+- **`cluster.config` format version 4** (reads 1 to 4):
   - v2 adds auto failover enabled, successor, timeout, fenced and fenced-by;
-  - v3 adds the witness address list and the paused-until time.
+  - v3 adds the witness address list and the paused-until time;
+  - v4 adds the Primary term.
+- **Primary term.** Every promotion increments a term, which Secondaries copy from the Primary on each heartbeat (`primaryTerm` in the cluster state). A Primary fences itself only when the other Primary itself answers its heartbeat with a higher term. A Secondary reporting a different Primary is logged but never enough, so one stale, misled or compromised node can't stop the real Primary.
 
 ## Code changes
 
@@ -142,7 +144,7 @@ So if an administrator changes the successor just before the Primary fails, node
   - Older nodes ignore the new JSON fields.
   - A new Secondary under an old Primary sees `configLastModified` missing and skips the check. Auto failover is reported as disabled, so it never activates.
   - Old nodes don't run the catch-up check and won't answer votes. Unreachable voters don't count, so in a mixed cluster the majority is harder to reach, never easier.
-- **Downgrade:** `cluster.config` is written as v3, which older builds can't read. ⚠ **Question for maintainers:** should it keep writing v1 while none of the new options are set, so downgrades keep working?
+- **Downgrade:** `cluster.config` is written as v4, which older builds can't read. ⚠ **Question for maintainers:** should it keep writing v1 while none of the new options are set, so downgrades keep working?
 
 ## Testing
 

@@ -46,12 +46,12 @@ jobs:
 
     steps:
       - name: Checkout DnsServer
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           path: DnsServer
 
       - name: Checkout TechnitiumLibrary
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: TechnitiumSoftware/TechnitiumLibrary
           ref: ${{ github.event.inputs.technitium_library_ref || env.TECHNITIUM_LIBRARY_REF }}
@@ -82,7 +82,7 @@ jobs:
           echo "### Fork version ${info}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Setup .NET 10
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         env:
           # default install dir (/usr/share/dotnet) needs root; the runner's tool cache is writable and persists between runs
           DOTNET_INSTALL_DIR: ${{ runner.tool_cache }}/dotnet
@@ -91,7 +91,7 @@ jobs:
 
       # self-hosted runners may not ship Node; needed for the web console syntax check
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
@@ -144,7 +144,7 @@ jobs:
           tar -tzf bundle/DnsServerPortable.tar.gz | grep -qx './systemd.service'
 
       - name: Upload install bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: install-bundle
           path: bundle
@@ -164,14 +164,12 @@ jobs:
       # the image copies the platform-neutral publish output onto the multi-arch aspnet base image,
       # so amd64 (PCs, NUCs) and arm64 (Raspberry Pi 4/5) are built from the same publish folder
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - name: Log in to GitHub Container Registry
         if: github.event_name == 'push'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -179,7 +177,7 @@ jobs:
 
       - name: Docker image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ghcr.io/${{ github.repository_owner }}/dnsserver
           tags: |
@@ -192,7 +190,7 @@ jobs:
 
       # pull requests only build the image; pushes to this repo also publish it
       - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: DnsServer
           platforms: linux/amd64,linux/arm64
@@ -203,7 +201,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Upload build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: DnsServer-${{ env.FORK_VERSION }}
           path: DnsServer/DnsServerApp/bin/Release/publish
@@ -219,12 +217,12 @@ jobs:
 
     steps:
       - name: Checkout DnsServer
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           path: DnsServer
 
       - name: Download build
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: DnsServer-${{ needs.build.outputs.version }}
           path: DnsServer/DnsServerApp/bin/Release/publish
@@ -243,26 +241,37 @@ jobs:
   # Publishes two releases per build:
   #   v<version>   - kept for rollback; its install.sh installs exactly that build
   #   fork-latest  - rolling; its install.sh always installs the newest build, and its update.json feeds the web console update check
-  # Install/update:  curl -sSL https://github.com/<owner>/DnsServer/releases/download/fork-latest/install.sh | sudo bash
+  # Install/update:  curl -fsSLo install.sh https://github.com/<owner>/DnsServer/releases/download/fork-latest/install.sh && sudo bash install.sh
   release:
     # nothing is published unless the ACME end-to-end test passes too
     needs: [build, acme-e2e]
     # change the branch here (e.g. to master) once the fork's work is merged there
     if: github.event_name == 'push' && github.ref_name == 'fork/main'
-    runs-on: [self-hosted, Linux, X64, big]
+    # GitHub-hosted on purpose: this job holds a contents: write token and only calls the GitHub API,
+    # so it never runs on the persistent self-hosted runners
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
+      id-token: write # sign the provenance attestation; only here, never on the self-hosted runners
+      attestations: write
 
     steps:
       - name: Download install bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: install-bundle
           path: bundle
 
+      # signed provenance: lets anyone check a downloaded tarball was published by this workflow from this repo
+      #   gh attestation verify DnsServerPortable.tar.gz -R <owner>/DnsServer
+      - name: Attest release tarball provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: bundle/DnsServerPortable.tar.gz
+
       - name: Publish releases
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           FORK_VERSION: ${{ needs.build.outputs.version }}
         with:
@@ -279,6 +288,8 @@ jobs:
             const base = `https://github.com/${owner}/${repo}`;
             const upstreamInstaller = fs.readFileSync(path.join('bundle', 'install.upstream.sh'), 'utf8');
             const tarball = fs.readFileSync(path.join('bundle', 'DnsServerPortable.tar.gz'));
+            const tarballSha256 = require('crypto').createHash('sha256').update(tarball).digest('hex');
+            const sha256Sums = Buffer.from(`${tarballSha256}  DnsServerPortable.tar.gz\n`, 'utf8');
 
             if (fs.readFileSync(path.join('bundle', 'version.txt'), 'utf8').trim() !== version)
               throw new Error('bundle version does not match build version');
@@ -287,8 +298,9 @@ jobs:
             //  - download URL points at this fork's release (DNS_TAR_URL overrides it)
             //  - curl follows redirects: GitHub release downloads redirect, and upstream's curl has no -L,
             //    which silently saved an empty tarball
-            //  - archive is verified before extracting and extraction failures abort, so a bad download
-            //    leaves the running install untouched instead of reporting success
+            //  - the download's SHA-256 must match the tarball published with this installer (skipped only
+            //    when DNS_TAR_URL points somewhere else), and the archive is verified before extracting;
+            //    extraction failures abort, so a bad download leaves the running install untouched
             function makeInstaller(tag) {
               const tarUrl = `${base}/releases/download/${tag}/DnsServerPortable.tar.gz`;
               const label = (tag === rollingTag) ? `${owner}/${repo} latest build` : `${owner}/${repo} ${version}`;
@@ -309,6 +321,16 @@ jobs:
                 {
                   match: line => line === 'tar -zxf $dnsTar -C $dnsDir >> $installLog 2>&1',
                   replace: () => [
+                    'if [ -z "$DNS_TAR_URL" ]',
+                    'then',
+                    `    if ! echo "${tarballSha256}  $dnsTar" | sha256sum -c - >> $installLog 2>&1`,
+                    '    then',
+                    '        echo "The downloaded file does not match the SHA-256 of this release; it may be corrupted or tampered with: $dnsTar"',
+                    '        echo "Nothing was changed; the installed version is still running. Please check \'$installLog\' for details."',
+                    '        exit 1',
+                    '    fi',
+                    'fi',
+                    '',
                     'if ! tar -tzf $dnsTar > /dev/null 2>> $installLog',
                     'then',
                     '    echo "Downloaded file is not a valid Technitium DNS Server archive: $dnsTar"',
@@ -391,7 +413,12 @@ jobs:
                 '',
                 note,
                 '```',
-                `curl -sSL ${base}/releases/download/${installTag}/install.sh | sudo bash`,
+                `curl -fsSLo install.sh ${base}/releases/download/${installTag}/install.sh && sudo bash install.sh`,
+                '```',
+                '',
+                `Tarball SHA-256: \`${tarballSha256}\` (also in SHA256SUMS; the installer checks it). Verify where it was built with:`,
+                '```',
+                `gh attestation verify DnsServerPortable.tar.gz -R ${owner}/${repo}`,
                 '```',
                 '',
                 'Docker:',
@@ -409,7 +436,8 @@ jobs:
               releaseBody(numberedTag, 'Install or roll back to exactly this build (keeps settings in /etc/dns):'),
               [
                 ['DnsServerPortable.tar.gz', tarball, 'application/gzip'],
-                ['install.sh', makeInstaller(numberedTag), 'text/x-shellscript']
+                ['install.sh', makeInstaller(numberedTag), 'text/x-shellscript'],
+                ['SHA256SUMS', sha256Sums, 'text/plain']
               ]);
 
             // 2. update feed in the format the web console's "check for update" expects
@@ -429,6 +457,7 @@ jobs:
               [
                 ['DnsServerPortable.tar.gz', tarball, 'application/gzip'],
                 ['install.sh', makeInstaller(rollingTag), 'text/x-shellscript'],
+                ['SHA256SUMS', sha256Sums, 'text/plain'],
                 ['update.json', updateJson, 'application/json']
               ]);
 
@@ -449,4 +478,4 @@ jobs:
               await deleteReleaseAndTag(old.tag_name);
             }
 
-            core.notice(`Published ${version}. Install: curl -sSL ${base}/releases/download/${rollingTag}/install.sh | sudo bash`);
+            core.notice(`Published ${version}. Install: curl -fsSLo install.sh ${base}/releases/download/${rollingTag}/install.sh && sudo bash install.sh`);
