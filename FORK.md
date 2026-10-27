@@ -46,12 +46,14 @@ To go back to official Technitium, run the official installer. It installs over 
 
 ## Versions, rollback and updates
 
-Fork builds are numbered **`<upstream version>.<CI run number>`**, for example `15.6.2.57`. That number is what the web console, the logs and the Cluster page show, so you can tell a fork build apart from official `15.6.2`, and one fork build from another. The assembly's informational version also carries the commit, for example `15.6.2.57+a1b2c3d`.
+Fork builds are labelled **`<upstream version>-fork.<CI run number>+<commit>`**, for example `15.6.2-fork.57+a1b2c3d`. That label is what the web console, the logs and the Cluster page show, so a fork build can't be mistaken for an official release, and you can still tell which of two fork builds is newer.
 
-Every build is also kept as a numbered release `v15.6.2.N`, holding the last 20. Each one has its own `install.sh` that installs exactly that build. To roll back or pin a server, run:
+Internally the assembly version stays numeric, `15.6.2.57`, because the update check and the App Store's minimum-version check compare it as a number. Builds before 15.6.2.17 used that numeric form as their visible version too.
+
+Every build is also kept as a release `v15.6.2-fork.N`, holding the last 20. Each one has its own `install.sh` that installs exactly that build. To roll back or pin a server, run:
 
 ```
-curl -fsSLo install.sh https://github.com/optimusprime-nn/DnsServer/releases/download/v15.6.2.57/install.sh && sudo bash install.sh
+curl -fsSLo install.sh https://github.com/optimusprime-nn/DnsServer/releases/download/v15.6.2-fork.57/install.sh && sudo bash install.sh
 ```
 
 The web console's **check for update** reads `update.json` from the `fork-latest` release instead of Technitium's servers. It reports when a newer fork build exists, and its link goes to that build's release page. It never offers the official download. These settings are applied by CI at build time; a plain local build still checks Technitium.
@@ -64,7 +66,7 @@ docker pull ghcr.io/optimusprime-nn/dnsserver:fork-main
 
 Images are built for amd64 and arm64 (Raspberry Pi 4/5). They are tagged with:
 
-- the fork version (`15.6.2.57`), which never changes once published, so use it to pin a server;
+- the fork label (`15.6.2-fork.57`), which never changes once published, so use it to pin a server;
 - the branch name, which moves to every new build;
 - `sha-<commit>`.
 

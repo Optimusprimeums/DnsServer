@@ -76,6 +76,7 @@ namespace DnsServerCore
         static readonly IPEndPoint IPENDPOINT_ANY_0 = new IPEndPoint(IPAddress.Any, 0);
 
         readonly Version _currentVersion;
+        readonly string _displayVersion; //fork builds: e.g. 15.6.2-fork.16+abc1234; null for official builds
         readonly DateTime _uptimestamp = DateTime.UtcNow;
         readonly string _appFolder;
         readonly string _configFolder;
@@ -167,6 +168,13 @@ namespace DnsServerCore
             Assembly assembly = Assembly.GetExecutingAssembly();
 
             _currentVersion = assembly.GetName().Version;
+
+            //fork builds keep a numeric version for update and app compatibility checks, but show a label
+            //that can't be mistaken for an official release
+            string informationalVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            if ((informationalVersion is not null) && informationalVersion.Contains("-fork."))
+                _displayVersion = informationalVersion;
+
             _appFolder = Path.GetDirectoryName(assembly.Location);
 
             if (configFolder is null)
@@ -1638,7 +1646,7 @@ namespace DnsServerCore
 
         private string GetServerVersion()
         {
-            return GetCleanVersion(_currentVersion);
+            return _displayVersion ?? GetCleanVersion(_currentVersion);
         }
 
         private static string GetCleanVersion(Version version)
@@ -3054,12 +3062,12 @@ namespace DnsServerCore
                 _dhcpServer.Start();
                 _dhcpFailoverManager.Start();
 
-                _log.Write("DNS Server (v" + _currentVersion.ToString() + ") was started successfully.");
+                _log.Write("DNS Server (v" + GetServerVersion() + ") was started successfully.");
                 _isRunning = true;
             }
             catch (Exception ex)
             {
-                _log.Write("Failed to start DNS Server (v" + _currentVersion.ToString() + ").", ex);
+                _log.Write("Failed to start DNS Server (v" + GetServerVersion() + ").", ex);
                 throw;
             }
         }
@@ -3090,12 +3098,12 @@ namespace DnsServerCore
                 if (_dnsServer is not null)
                     await _dnsServer.DisposeAsync();
 
-                _log.Write("DNS Server (v" + _currentVersion.ToString() + ") was stopped successfully.");
+                _log.Write("DNS Server (v" + GetServerVersion() + ") was stopped successfully.");
                 _isRunning = false;
             }
             catch (Exception ex)
             {
-                _log.Write("Failed to stop DNS Server (v" + _currentVersion.ToString() + ").", ex);
+                _log.Write("Failed to stop DNS Server (v" + GetServerVersion() + ").", ex);
                 throw;
             }
         }
@@ -3114,7 +3122,7 @@ namespace DnsServerCore
         { get { return _configFolder; } }
 
         public string Version
-        { get { return GetCleanVersion(_currentVersion); } }
+        { get { return GetServerVersion(); } }
 
         public int WebServiceHttpPort
         { get { return _webServiceHttpPort; } }

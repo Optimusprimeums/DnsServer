@@ -43,6 +43,8 @@ jobs:
       packages: write # push image to ghcr.io
     outputs:
       version: ${{ steps.version.outputs.version }}
+      label: ${{ steps.version.outputs.label }}
+      info: ${{ steps.version.outputs.info }}
 
     steps:
       - name: Checkout DnsServer
@@ -57,7 +59,10 @@ jobs:
           ref: ${{ github.event.inputs.technitium_library_ref || env.TECHNITIUM_LIBRARY_REF }}
           path: TechnitiumLibrary
 
-      # fork version = <upstream version>.<run number>, e.g. 15.6.2.57; the commit goes in the informational version
+      # fork label = <upstream version>-fork.<run number>+<commit>, e.g. 15.6.2-fork.57+abc1234: shown in the web console,
+      # release names and image tags so a fork build can't be mistaken for an official release.
+      # The assembly version stays numeric (<upstream version>.<run number>, e.g. 15.6.2.57) because the update check
+      # and App Store compatibility compare it as a System.Version.
       - name: Compute fork version
         id: version
         run: |
@@ -74,12 +79,16 @@ jobs:
           fi
 
           version="${base}.${GITHUB_RUN_NUMBER}"
-          info="${version}+${GITHUB_SHA::7}"
+          label="${base}-fork.${GITHUB_RUN_NUMBER}"
+          info="${label}+${GITHUB_SHA::7}"
 
           echo "FORK_VERSION=${version}" >> "$GITHUB_ENV"
+          echo "FORK_LABEL=${label}" >> "$GITHUB_ENV"
           echo "FORK_INFO_VERSION=${info}" >> "$GITHUB_ENV"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "### Fork version ${info}" >> "$GITHUB_STEP_SUMMARY"
+          echo "label=${label}" >> "$GITHUB_OUTPUT"
+          echo "info=${info}" >> "$GITHUB_OUTPUT"
+          echo "### Fork build ${info} (assembly version ${version})" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Setup .NET 10
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
@@ -181,7 +190,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/dnsserver
           tags: |
-            type=raw,value=${{ env.FORK_VERSION }}
+            type=raw,value=${{ env.FORK_LABEL }}
             type=ref,event=branch
             type=sha,prefix=sha-,format=short
             type=raw,value=latest,enable={{is_default_branch}}
@@ -239,7 +248,7 @@ jobs:
         run: docker rmi -f "technitium-acme-e2e:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >/dev/null 2>&1 || true
 
   # Publishes two releases per build:
-  #   v<version>   - kept for rollback; its install.sh installs exactly that build
+  #   v<label>     - e.g. v15.6.2-fork.57; kept for rollback; its install.sh installs exactly that build
   #   fork-latest  - rolling; its install.sh always installs the newest build, and its update.json feeds the web console update check
   # Install/update:  curl -fsSLo install.sh https://github.com/<owner>/DnsServer/releases/download/fork-latest/install.sh && sudo bash install.sh
   release:
@@ -274,17 +283,21 @@ jobs:
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           FORK_VERSION: ${{ needs.build.outputs.version }}
+          FORK_LABEL: ${{ needs.build.outputs.label }}
+          FORK_INFO_VERSION: ${{ needs.build.outputs.info }}
         with:
           script: |
             const fs = require('fs');
             const path = require('path');
             const { owner, repo } = context.repo;
-            const version = process.env.FORK_VERSION;
+            const version = process.env.FORK_VERSION; // numeric assembly version: update feed comparison only
+            const label = process.env.FORK_LABEL;     // e.g. 15.6.2-fork.57: everything people see
+            const infoVersion = process.env.FORK_INFO_VERSION;
             const rollingTag = process.env.RELEASE_TAG;
             const keep = parseInt(process.env.KEEP_NUMBERED_RELEASES, 10);
             const branch = context.ref.replace('refs/heads/', '');
             const shortSha = context.sha.substring(0, 7);
-            const numberedTag = `v${version}`;
+            const numberedTag = `v${label}`;
             const base = `https://github.com/${owner}/${repo}`;
             const upstreamInstaller = fs.readFileSync(path.join('bundle', 'install.upstream.sh'), 'utf8');
             const tarball = fs.readFileSync(path.join('bundle', 'DnsServerPortable.tar.gz'));
@@ -303,7 +316,7 @@ jobs:
             //    extraction failures abort, so a bad download leaves the running install untouched
             function makeInstaller(tag) {
               const tarUrl = `${base}/releases/download/${tag}/DnsServerPortable.tar.gz`;
-              const label = (tag === rollingTag) ? `${owner}/${repo} latest build` : `${owner}/${repo} ${version}`;
+              const installerLabel = (tag === rollingTag) ? `${owner}/${repo} latest build` : `${owner}/${repo} ${label}`;
 
               const replacements = [
                 {
@@ -312,7 +325,7 @@ jobs:
                 },
                 {
                   match: line => line === 'echo "Technitium DNS Server Installer"',
-                  replace: () => [`echo "Technitium DNS Server Installer (${label})"`]
+                  replace: () => [`echo "Technitium DNS Server Installer (${installerLabel}, unofficial fork build)"`]
                 },
                 {
                   match: line => line === 'if ! curl -o $dnsTar --fail $dnsUrl >> $installLog 2>&1',
@@ -409,7 +422,7 @@ jobs:
 
             function releaseBody(installTag, note) {
               return [
-                `Automated build **${version}** of \`${branch}\` at ${context.sha}.`,
+                `Unofficial fork build **${infoVersion}** of \`${branch}\` at ${context.sha}. Not an official Technitium release.`,
                 '',
                 note,
                 '```',
@@ -423,7 +436,7 @@ jobs:
                 '',
                 'Docker:',
                 '```',
-                `docker pull ghcr.io/${owner.toLowerCase()}/dnsserver:${version}`,
+                `docker pull ghcr.io/${owner.toLowerCase()}/dnsserver:${label}`,
                 '```',
                 '',
                 `Changes: ${base}/commits/${context.sha}`
@@ -432,7 +445,7 @@ jobs:
 
             // 1. numbered release first so the feed below never points at a missing release
             await deleteReleaseAndTag(numberedTag); // only exists if this run is re-run
-            await createRelease(numberedTag, `v${version}`,
+            await createRelease(numberedTag, `v${label} (fork)`,
               releaseBody(numberedTag, 'Install or roll back to exactly this build (keeps settings in /etc/dns):'),
               [
                 ['DnsServerPortable.tar.gz', tarball, 'application/gzip'],
@@ -443,7 +456,7 @@ jobs:
             // 2. update feed in the format the web console's "check for update" expects
             const updateJson = Buffer.from(JSON.stringify({
               updateVersion: version,
-              updateTitle: `Fork build ${version} is available`,
+              updateTitle: `Fork build ${label} is available`,
               updateMessage: `A new build of the ${owner}/${repo} fork is available. Update by running the install command again; settings in /etc/dns are kept.`,
               downloadLink: `${base}/releases/tag/${numberedTag}`,
               instructionsLink: `${base}/blob/${branch}/FORK.md`,
@@ -452,7 +465,7 @@ jobs:
 
             // 3. rolling release
             await deleteReleaseAndTag(rollingTag);
-            await createRelease(rollingTag, `Latest fork build (${version})`,
+            await createRelease(rollingTag, `Latest fork build (${label})`,
               releaseBody(rollingTag, 'Install or update to the newest build (keeps settings in /etc/dns):'),
               [
                 ['DnsServerPortable.tar.gz', tarball, 'application/gzip'],
@@ -464,10 +477,10 @@ jobs:
             // 4. prune old numbered releases
             const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
             const numbered = releases
-              .filter(r => /^v\d+\.\d+\.\d+\.\d+$/.test(r.tag_name))
+              .filter(r => /^v\d+\.\d+\.\d+-fork\.\d+$/.test(r.tag_name))
               .sort((a, b) => {
-                const pa = a.tag_name.substring(1).split('.').map(Number);
-                const pb = b.tag_name.substring(1).split('.').map(Number);
+                const pa = a.tag_name.substring(1).replace('-fork.', '.').split('.').map(Number);
+                const pb = b.tag_name.substring(1).replace('-fork.', '.').split('.').map(Number);
                 for (let i = 0; i < 4; i++)
                   if (pa[i] !== pb[i]) return pb[i] - pa[i];
                 return 0;
@@ -478,4 +491,4 @@ jobs:
               await deleteReleaseAndTag(old.tag_name);
             }
 
-            core.notice(`Published ${version}. Install: curl -fsSLo install.sh ${base}/releases/download/${rollingTag}/install.sh && sudo bash install.sh`);
+            core.notice(`Published ${infoVersion}. Install: curl -fsSLo install.sh ${base}/releases/download/${rollingTag}/install.sh && sudo bash install.sh`);
