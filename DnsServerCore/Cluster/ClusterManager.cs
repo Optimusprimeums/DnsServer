@@ -82,6 +82,8 @@ namespace DnsServerCore.Cluster
         //set when another node in this cluster has taken over as primary while this primary was unreachable
         volatile bool _fenced;
         string _fencedByNodeName;
+        uint _primaryTerm; //incremented on every promotion; a Primary is fenced only by a Primary with a higher term
+        readonly Dictionary<int, DateTime> _fenceRejectedLoggedOn = new Dictionary<int, DateTime>();
 
         IReadOnlyDictionary<int, ClusterNode> _clusterNodes;
 
@@ -354,6 +356,7 @@ namespace DnsServerCore.Cluster
                 _autoFailoverPausedUntil = default;
                 _fenced = false;
                 _fencedByNodeName = null;
+                _primaryTerm = 0;
 
                 //delete config file
                 string configFile = Path.Combine(_dnsWebService.ConfigFolder, "cluster.config");
@@ -389,6 +392,7 @@ namespace DnsServerCore.Cluster
                 case 1:
                 case 2:
                 case 3:
+                case 4:
                     _clusterDomain = bR.ReadString();
                     _heartbeatRefreshIntervalSeconds = bR.ReadUInt16();
                     _heartbeatRetryIntervalSeconds = bR.ReadUInt16();
@@ -460,6 +464,11 @@ namespace DnsServerCore.Cluster
                         _autoFailoverPausedUntil = default;
                     }
 
+                    if (version >= 4)
+                        _primaryTerm = bR.ReadUInt32();
+                    else
+                        _primaryTerm = 0;
+
                     break;
 
                 default:
@@ -472,7 +481,7 @@ namespace DnsServerCore.Cluster
             BinaryWriter bW = new BinaryWriter(s);
 
             bW.Write(Encoding.ASCII.GetBytes("CL")); //format
-            bW.Write((byte)3); //version
+            bW.Write((byte)4); //version
 
             bW.Write(_clusterDomain);
             bW.Write(_heartbeatRefreshIntervalSeconds);
@@ -515,6 +524,8 @@ namespace DnsServerCore.Cluster
             }
 
             s.WriteDateTime(_autoFailoverPausedUntil);
+
+            bW.Write(_primaryTerm);
         }
 
         #endregion
@@ -1498,6 +1509,30 @@ namespace DnsServerCore.Cluster
                 //remote follows another member of this cluster as primary: that node was promoted while this node was unreachable
                 if (!_fenced)
                 {
+                    //fence only when the other Primary itself confirms that it was promoted after this node became Primary;
+                    //a Secondary's view (stale, misled or compromised) is never enough to stop this Primary
+                    uint remotePrimaryTerm = remoteClusterInfo.PrimaryTerm ?? 0;
+
+                    if ((remotePrimaryNodeInfo.Id != remoteNode.Id) || (remotePrimaryTerm <= _primaryTerm))
+                    {
+                        lock (_fenceRejectedLoggedOn)
+                        {
+                            DateTime utcNow = DateTime.UtcNow;
+
+                            if (_fenceRejectedLoggedOn.TryGetValue(remoteNode.Id, out DateTime loggedOn) && (utcNow < loggedOn.AddSeconds(STALE_NODE_NOTIFY_INTERVAL_SECONDS)))
+                                return;
+
+                            _fenceRejectedLoggedOn[remoteNode.Id] = utcNow;
+                        }
+
+                        if (remotePrimaryNodeInfo.Id != remoteNode.Id)
+                            _dnsWebService.LogManager.Write("Cluster: node '" + remoteNode.ToString() + "' reports that '" + remotePrimaryNodeInfo.Name + "' is the Primary node. This node stays Primary unless '" + remotePrimaryNodeInfo.Name + "' itself confirms a newer promotion.");
+                        else
+                            _dnsWebService.LogManager.Write("WARNING! Cluster: node '" + remoteNode.ToString() + "' also claims to be the Primary node, but with Primary term " + remotePrimaryTerm + " which isn't newer than this node's term " + _primaryTerm + ". Not fencing; check the Cluster and remove the stale Primary node.");
+
+                        return;
+                    }
+
                     _fencedByNodeName = remotePrimaryNodeInfo.Name;
                     _fenced = true;
 
@@ -2425,6 +2460,14 @@ namespace DnsServerCore.Cluster
         {
             IReadOnlyDictionary<int, ClusterNode> existingClusterNodes = _clusterNodes;
 
+            //follow the primary's term so a promotion of this node always gets a newer term than the primary it replaces
+            uint primaryTerm = primaryNodeClusterInfo.PrimaryTerm ?? 0;
+            if (primaryTerm > _primaryTerm)
+            {
+                _primaryTerm = primaryTerm;
+                SaveConfigFile();
+            }
+
             //validation
             foreach (KeyValuePair<int, ClusterNode> existingClusterNode in existingClusterNodes)
             {
@@ -2659,6 +2702,9 @@ namespace DnsServerCore.Cluster
 
             //promote self node to primary immediately
             selfNewPrimaryNode.PromoteToPrimaryNode();
+
+            //a new term lets the former primary recognize this promotion as newer than its own when it comes back
+            _primaryTerm++;
 
             //convert cluster secondary catalog zone to catalog zone along with all its member zones
             if (clusterCatalogZoneInfo.Type == AuthZoneType.SecondaryCatalog)
@@ -2913,6 +2959,9 @@ namespace DnsServerCore.Cluster
 
         public string FencedByNodeName
         { get { return _fencedByNodeName; } }
+
+        public uint PrimaryTerm
+        { get { return _primaryTerm; } }
 
         public IReadOnlyDictionary<int, ClusterNode> ClusterNodes
         { get { return _clusterNodes; } }

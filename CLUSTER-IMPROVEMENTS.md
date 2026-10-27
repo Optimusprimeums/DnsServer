@@ -34,7 +34,7 @@ This is set in Cluster Options on the Primary: **Enable Auto Failover**, a **Suc
 5. While a maintenance pause is active (see below), the successor never promotes and other nodes don't vote. A pause can be set with `/api/admin/cluster/primary/pauseAutoFailover?minutes=N`, where `N=0` resumes.
 6. Promotion uses the existing forced "Promote To Primary" path. Afterwards auto failover is turned off until you pick a new successor.
 
-**Fencing.** When the old Primary comes back, it still thinks it is the Primary. On its next heartbeat it sees that the other nodes follow a different Primary that is a member of its own node list, and **fences** itself:
+**Fencing.** When the old Primary comes back, it still thinks it is the Primary. Every promotion increments a **Primary term**, which Secondaries copy from the Primary on each heartbeat. The old Primary fences itself only when the new Primary itself answers its heartbeat as Primary with a higher term than its own. A Secondary merely reporting a different Primary is logged but never enough, so a stale or compromised Secondary can't stop the real Primary. When it fences:
 
 - it stops sending notifies,
 - it refuses config transfers,
