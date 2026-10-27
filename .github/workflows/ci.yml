@@ -33,10 +33,10 @@ jobs:
         DOTNET_CLI_TELEMETRY_OPTOUT: "1"
         DOTNET_NOLOGO: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           path: DnsServer
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: TechnitiumSoftware/TechnitiumLibrary
           path: TechnitiumLibrary
@@ -60,7 +60,7 @@ jobs:
       - name: Publish DnsServerApp (what the Dockerfile copies)
         run: dotnet publish DnsServer/DnsServerApp/DnsServerApp.csproj -c Release
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dnsserverapp-publish
           path: DnsServer/DnsServerApp/bin/Release/publish/
@@ -86,8 +86,8 @@ jobs:
       volumes:
         - /var/run/docker.sock:/var/run/docker.sock
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: dnsserverapp-publish
           path: DnsServerApp/bin/Release/publish
@@ -112,11 +112,11 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           path: DnsServer
           clean: true
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: TechnitiumSoftware/TechnitiumLibrary
           path: TechnitiumLibrary
@@ -157,7 +157,7 @@ jobs:
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" DnsServerSetup.iss
           if ($LASTEXITCODE) { throw "ISCC failed ($LASTEXITCODE)" }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dnsserver-windows-setup
           path: DnsServer/DnsServerWindowsSetup/Release/*.exe
