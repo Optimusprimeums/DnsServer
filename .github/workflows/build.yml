@@ -109,6 +109,22 @@ jobs:
             -p:InformationalVersion="${FORK_INFO_VERSION}" \
             -p:UpdateCheckUri="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/update.json"
 
+      # web files are listed one by one in DnsServerCore.csproj; a file added to www but not to the project
+      # silently ships missing (this happened with acme.js), so compare the source folder with the build output
+      - name: Check web console files are published
+        run: |
+          missing=0
+          for root in www dohwww; do
+            while IFS= read -r f; do
+              if [ ! -f "DnsServer/DnsServerApp/bin/Release/publish/$root/$f" ]; then
+                echo "::error file=DnsServerCore/DnsServerCore.csproj::DnsServerCore/$root/$f is not in the build output; add it to DnsServerCore.csproj"
+                missing=1
+              fi
+            done < <(cd "DnsServer/DnsServerCore/$root" && find . -type f | sed 's|^\./||')
+          done
+          [ "$missing" -eq 0 ] && echo "All web console files are published."
+          exit "$missing"
+
       # same layout and file name as the official DnsServerPortable.tar.gz, so the stock installer logic works unchanged
       - name: Package portable tarball
         run: |
