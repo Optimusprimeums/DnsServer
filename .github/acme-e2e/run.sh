@@ -184,18 +184,34 @@ api zones/create zone other.test type Primary >/dev/null
 api zones/records/add zone other.test domain _acme-challenge.dns.other.test type CNAME cname delegated.acme.test ttl 60 >/dev/null
 api zones/create zone rfc.test type Primary >/dev/null
 
-# web service HTTPS on 53443, starting with the self-signed certificate until ACME installs its own
-api settings/set webServiceEnableTls true webServiceUseSelfSignedTlsCertificate true webServiceTlsPort 53443 >/dev/null
-sleep 5
-wait_for_api
-
 ########################################################################################################
 
-log "Scenario 1: zone on this server, wildcard"
+log "Web Service tab: enable HTTPS with no certificate file and self signed off, ACME managing the certificate"
+# fresh server: HTTPS off, no certificate path, self signed off; configure ACME before any certificate exists
 api settings/acme/set enabled true directoryUrl https://pebble:14000/dir termsOfServiceAgreed true \
     domains "dns.acme.test,*.acme.test" dns01Provider LocalZone publicResolvers 127.0.0.1 \
     useForWebService true useForDnsTls false propagationTimeoutSeconds 60 >/dev/null
 
+settings="$(api settings/get)"
+[ "$(jq_py 'd["webServiceTlsCertificateManagedByAcme"]' <<<"$settings")" = "True" ] || { echo "settings don't report the certificate as managed by ACME"; exit 1; }
+
+# same call the Web Service tab makes; before the fix the server silently turned HTTPS back off
+api settings/set webServiceEnableTls true webServiceUseSelfSignedTlsCertificate false webServiceTlsPort 53443 webServiceTlsCertificatePath "" >/dev/null
+sleep 5
+wait_for_api
+
+settings="$(api settings/get)"
+[ "$(jq_py 'd["webServiceEnableTls"]' <<<"$settings")" = "True" ] || { echo "HTTPS was turned back off after saving"; exit 1; }
+echo "   HTTPS stays enabled with no certificate path and self signed off"
+
+for _ in $(seq 1 15); do
+    docker exec "$DNS" curl -sk -o /dev/null --max-time 5 https://127.0.0.1:53443/ && break
+    sleep 2
+done
+docker exec "$DNS" curl -sk -o /dev/null --max-time 5 https://127.0.0.1:53443/ || { echo "web console is not answering on HTTPS"; exit 1; }
+echo "   Web console answers on HTTPS with the temporary certificate before ACME has issued one"
+
+log "Scenario 1: zone on this server, wildcard"
 echo "   Test DNS-01: $(api settings/acme/testDns01 | jq_py 'd["result"]')"
 issue_and_check "dns.acme.test,*.acme.test"
 refresh_pebble_root
