@@ -119,7 +119,8 @@ The server-to-server endpoints follow the existing cluster API's convention: an 
 | Web console JS syntax check | ✔ |
 | Merges cleanly with the cluster improvements PR in either order; combined build | ✔ |
 | Running on a live two-server network (with ACME and the cluster changes), serving real clients | ✔ |
-| Live failover scenarios with real DHCP clients | ☐ **Not yet tested.** To do before marking ready: normal replication, stop Primary → Standby serves after the delay, restart Primary → merge and hand back, split brain (block traffic between the servers only), invalid token, Standby restart. |
+| Live failover with real DHCP clients on two servers: normal replication; stop Primary → Standby serves after the delay; restart Primary → leases merged and handed back; split brain (traffic blocked between the servers only); Standby restart | ✔ |
+| Live: invalid token (the Standby must treat the Primary as alive and not start serving) | ☐ Not yet tested |
 
 > Fill in the last row with your own results before submitting. Reviewers will ask.
 
