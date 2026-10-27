@@ -32,6 +32,7 @@ It's off by default, and nothing changes until an admin enables it.
   - On a Cluster node, the node's certificate is republished to the Cluster.
   - The encrypted DNS listeners restart only when the certificate path changes.
   - Renewals replace the file in place.
+- **HTTPS before the first certificate:** once ACME manages the web certificate, HTTPS can be enabled immediately, from the Web Service tab or with **Enable HTTPS now** on the ACME tab. A temporary self-signed certificate is used until the first ACME certificate replaces it. This also fixes the existing behavior where enabling HTTPS with no certificate path and self-signed off was silently undone on save; without ACME, that case now shows an explanation.
 - **Renewal:** checked 2 minutes after start and then every 6 hours. A certificate is renewed 30 days before expiry (configurable), when the names change, or when none has been issued yet.
 - **Cluster:** each node manages its own certificate, since every node has its own name. ACME settings aren't part of the Cluster config transfer.
 - **Testing and visibility:** a **Test DNS-01** button publishes, verifies and removes a test record without contacting the CA, and a log shows each step.
