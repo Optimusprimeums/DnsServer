@@ -1,7 +1,7 @@
 # PR: Automatic TLS certificates with ACME (DNS-01)
 
 **Branch:** `optimusprime-nn/DnsServer:upstream/acme` → **`TechnitiumSoftware/DnsServer:develop`**
-**Commit:** single commit, 9 files, about +2900 lines. It's independent of the DHCP failover and cluster improvements PRs; all three merge cleanly in any order.
+**Commits:** 5 commits, 11 files, about +3000 lines. It's independent of the DHCP failover and cluster improvements PRs; all three merge cleanly in any order.
 
 ---
 
@@ -59,7 +59,9 @@ It's off by default, and nothing changes until an admin enables it.
 | `Acme/Dns01Providers.cs` (new) | `IDns01Provider`; local zone, RFC 2136, Cloudflare providers; `Dns01Resolver` (CNAME following, propagation check) |
 | `Acme/AcmeManager.cs` (new) | Settings and storage, account handling (including re-registration if the CA account is gone), issuance workflow, renewal timer, install, status and log |
 | `WebServiceAcmeApi.cs` (new) | `/api/settings/acme/{get,set,directoryInfo,request,testDns01}` |
-| `DnsWebService.cs` | Manager lifetime and routes; `InstallWebServiceTlsCertificate` / `InstallDnsTlsCertificate` |
+| `DnsWebService.cs` | Manager lifetime and routes; `InstallWebServiceTlsCertificate` / `InstallDnsTlsCertificate`; temporary self-signed fallback while ACME manages the web certificate |
+| `WebServiceSettingsApi.cs` | Keeps HTTPS enabled when ACME manages the web certificate; reports which certificates ACME manages |
+| `DnsServerCore.csproj` | Includes `acme.js` in the build output |
 | `www/index.html`, `www/js/acme.js` (new), `www/js/main.js` | Settings tab; the page-wide Save Settings button is hidden on the ACME tab, which has its own |
 | `ACME.md` (new) | User documentation: setup, providers, CNAME delegation, Cluster, troubleshooting, limitations, API |
 
@@ -72,6 +74,7 @@ It's off by default, and nothing changes until an admin enables it.
 | `/api/settings/acme/directoryInfo` | Settings: Modify (the server fetches an admin-supplied URL) |
 | `/api/settings/acme/request` | Settings: Modify |
 | `/api/settings/acme/testDns01` | Settings: Modify |
+| `/api/settings/acme/enableHttps` | Settings: Modify |
 
 All accept `node=`. Parameters are documented in `ACME.md`.
 
