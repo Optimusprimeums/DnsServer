@@ -268,8 +268,9 @@ Push builds are never cancelled mid-release (`cancel-in-progress` is on for PRs 
 - ✔ Release assets were downloaded and checked: version strings, update URL, installer patches, tarball contents.
 - ✔ The installer download and verify lines were run against the live release.
 - ✔ ACME end-to-end against Pebble (three providers/paths, HTTPS verified) passes in CI on every push to `fork/main`.
-- ☐ **Not yet run on real servers with real DHCP clients or a live Cluster.** See the test plans in the PR descriptions. Do this before submitting upstream.
-- ☐ **ACME not yet run against a real CA**, i.e. Let's Encrypt staging with Cloudflare on ns2.
+- ✔ **Running on two real servers** (ns1/ns2) with DHCP failover on and real clients.
+- ☐ **Failover scenarios not yet exercised live** (stop Primary, split brain, Cluster promotion, etc.). See the test plans in the PR descriptions. Do this before submitting upstream.
+- ✔ **ACME verified against a real CA:** Let's Encrypt with Cloudflare DNS-01; certificates issued on ns1 and ns2.
 
 ## 8. Open items
 

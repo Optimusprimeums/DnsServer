@@ -118,7 +118,8 @@ The server-to-server endpoints follow the existing cluster API's convention: an 
 | Builds on `develop` (with TechnitiumLibrary `develop`) and on `v15.6.2`, no new warnings | ✔ |
 | Web console JS syntax check | ✔ |
 | Merges cleanly with the cluster improvements PR in either order; combined build | ✔ |
-| Live two-server failover with real DHCP clients | ☐ **Not yet tested.** To do before marking ready: normal replication, stop Primary → Standby serves after the delay, restart Primary → merge and hand back, split brain (block traffic between the servers only), invalid token, Standby restart. |
+| Running on a live two-server network (with ACME and the cluster changes), serving real clients | ✔ |
+| Live failover scenarios with real DHCP clients | ☐ **Not yet tested.** To do before marking ready: normal replication, stop Primary → Standby serves after the delay, restart Primary → merge and hand back, split brain (block traffic between the servers only), invalid token, Standby restart. |
 
 > Fill in the last row with your own results before submitting. Reviewers will ask.
 

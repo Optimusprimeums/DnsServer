@@ -83,7 +83,7 @@ All accept `node=`. Parameters are documented in `ACME.md`.
 | Merges cleanly with the DHCP failover and cluster improvements PRs in either order; combined build | ✔ |
 | Independent code review. It found 1 High, 5 Medium and 9 Low issues; all fixed or documented before this commit. The High one: renewals with an existing account failed because the directory wasn't loaded. | ✔ |
 | **End-to-end against Pebble**, Let's Encrypt's test CA (v2.10.1), on Docker with Pebble validating through Technitium. Scenarios: zone on this server with a wildcard (two TXT values at one name); CNAME delegation; RFC 2136 with a TSIG key scoped to one record, reusing the existing account. After each, the certificate served on HTTPS was verified against Pebble's root, including the host name. Pebble's 5% nonce rejection exercised the badNonce retry, and no challenge records were left behind. The script runs on every push in the fork's CI. | ✔ |
-| Real CA: Let's Encrypt staging with Cloudflare | ☐ **To do before submitting.** Fill in with your own result. |
+| Real CA: Let's Encrypt with Cloudflare DNS-01, on two servers behind a split-horizon local copy of the zone (staging first, then production) | ✔ Certificates issued and served on the web console of both servers |
 
 The end-to-end script (`.github/acme-e2e/run.sh` in the fork) can be added to this PR if you'd like it in the repository.
 
