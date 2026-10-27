@@ -1,0 +1,146 @@
+# CI for optimusprime-nn/DnsServer (fork of TechnitiumSoftware/DnsServer).
+# Steps follow build.md. TechnitiumLibrary (upstream, not forked) is checked out next to
+# DnsServer because the projects reference ..\TechnitiumLibrary\bin\*.dll.
+# There are no test projects, so this is a build check plus artifacts:
+#   linux   - the library parts DnsServer uses + 32 of the 33 projects in DnsServer.sln
+#             (tray app compiled with EnableWindowsTargeting; the Windows service needs
+#             Net.Firewall's COM reference, so it's built by the windows job) + the
+#             DnsServerApp publish the Dockerfile uses
+#   docker  - builds the image from that publish (not pushed anywhere)
+#   windows - tray app + Windows service published to DnsServerWindowsSetup\publish,
+#             then the Inno Setup installer, on the self-hosted Windows runner
+name: CI
+
+on:
+  push:            # all branches: work happens on cluster-improvements, dhcp-failover, ...
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Build (Linux, self-hosted)
+    runs-on: [self-hosted, linux, big]
+    container:
+      image: mcr.microsoft.com/dotnet/sdk:10.0
+      env:
+        DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+        DOTNET_NOLOGO: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: DnsServer
+      - uses: actions/checkout@v4
+        with:
+          repository: TechnitiumSoftware/TechnitiumLibrary
+          path: TechnitiumLibrary
+
+      # Only the library projects DnsServer references (their own project references
+      # pull in TechnitiumLibrary and .IO). Not the whole .sln: TechnitiumLibrary.Net.Firewall
+      # has a COM reference, which the dotnet CLI's MSBuild cannot resolve (MSB4803).
+      - name: Build TechnitiumLibrary (the parts DnsServer uses)
+        run: |
+          for p in ByteTree Net Net.Mail Security.OTP; do
+            dotnet build "TechnitiumLibrary/TechnitiumLibrary.$p/TechnitiumLibrary.$p.csproj" -c Release
+          done
+
+      # DnsServerWindowsService is the only project that needs Net.Firewall, so it is
+      # left out here (only in this CI checkout) and built by the windows job instead.
+      - name: Build every other project in DnsServer.sln
+        run: |
+          dotnet sln DnsServer/DnsServer.sln remove DnsServer/DnsServerWindowsService/DnsServerWindowsService.csproj
+          dotnet build DnsServer/DnsServer.sln -c Release -p:EnableWindowsTargeting=true
+
+      - name: Publish DnsServerApp (what the Dockerfile copies)
+        run: dotnet publish DnsServer/DnsServerApp/DnsServerApp.csproj -c Release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dnsserverapp-publish
+          path: DnsServer/DnsServerApp/bin/Release/publish/
+          if-no-files-found: error
+
+  docker:
+    name: Docker image (Linux, self-hosted)
+    needs: linux
+    runs-on: [self-hosted, linux, big]
+    # Talks to the VM's Docker through its socket; the image is built, not pushed.
+    container:
+      image: docker:cli
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dnsserverapp-publish
+          path: DnsServerApp/bin/Release/publish
+      - name: Build image
+        run: docker build -t "technitium-dns-ci:${GITHUB_SHA::12}" .
+      - name: Remove image
+        if: always()
+        run: docker image rm -f "technitium-dns-ci:${GITHUB_SHA::12}" || true
+
+  windows:
+    name: Windows installer (self-hosted)
+    runs-on: [self-hosted, windows, msvc]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: DnsServer
+          clean: true
+      - uses: actions/checkout@v4
+        with:
+          repository: TechnitiumSoftware/TechnitiumLibrary
+          path: TechnitiumLibrary
+          clean: true
+
+      - name: Build TechnitiumLibrary (the parts DnsServer uses)
+        run: |
+          foreach ($p in 'ByteTree', 'Net', 'Net.Mail', 'Security.OTP') {
+            dotnet build "TechnitiumLibrary\TechnitiumLibrary.$p\TechnitiumLibrary.$p.csproj" -c Release
+            if ($LASTEXITCODE) { throw "TechnitiumLibrary.$p build failed" }
+          }
+
+      # The Windows service needs Net.Firewall, whose COM reference (Windows Firewall
+      # API) only Visual Studio's MSBuild can resolve, not the dotnet CLI's (MSB4803).
+      # The VS Build Tools installed by setup-windows-ci.ps1 provide it.
+      - name: Build TechnitiumLibrary.Net.Firewall (Visual Studio MSBuild)
+        run: |
+          $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+          if (-not $msbuild) { throw "Visual Studio MSBuild not found (VS Build Tools missing?)" }
+          & $msbuild TechnitiumLibrary\TechnitiumLibrary.Net.Firewall\TechnitiumLibrary.Net.Firewall.csproj -restore -p:Configuration=Release -nologo -v:minimal
+          if ($LASTEXITCODE) { throw "Net.Firewall build failed" }
+
+      # Same output folder as the projects' Visual Studio publish profiles, but with an
+      # explicit -o: the tray app's FolderProfile.pubxml still says net9.0-windows7.0.
+      - name: Publish tray app + Windows service
+        run: |
+          $out = "$env:GITHUB_WORKSPACE\DnsServer\DnsServerWindowsSetup\publish"
+          if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+          dotnet publish DnsServer\DnsServerSystemTrayApp\DnsServerSystemTrayApp.csproj -c Release -o $out
+          if ($LASTEXITCODE) { throw "tray app publish failed" }
+          dotnet publish DnsServer\DnsServerWindowsService\DnsServerWindowsService.csproj -c Release -o $out
+          if ($LASTEXITCODE) { throw "service publish failed" }
+
+      - name: Build installer (Inno Setup)
+        working-directory: DnsServer\DnsServerWindowsSetup
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" DnsServerSetup.iss
+          if ($LASTEXITCODE) { throw "ISCC failed ($LASTEXITCODE)" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dnsserver-windows-setup
+          path: DnsServer/DnsServerWindowsSetup/Release/*.exe
+          if-no-files-found: error
