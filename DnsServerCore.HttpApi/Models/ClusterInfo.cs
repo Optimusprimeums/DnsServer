@@ -37,6 +37,7 @@ namespace DnsServerCore.HttpApi.Models
         public ushort AutoFailoverTimeoutSeconds { get; set; }
         public string[]? AutoFailoverWitnessAddresses { get; set; }
         public int? AutoFailoverPauseRemainingSeconds { get; set; }
+        public uint? PrimaryTerm { get; set; }
         public List<ClusterNodeInfo>? ClusterNodes { get; set; }
 
         public class ClusterNodeInfo

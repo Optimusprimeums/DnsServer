@@ -91,6 +91,7 @@ namespace DnsServerCore
 
                     jsonWriter.WriteNumber("autoFailoverPauseRemainingSeconds", _dnsWebService._clusterManager.AutoFailoverPauseRemainingSeconds);
 
+                    jsonWriter.WriteNumber("primaryTerm", _dnsWebService._clusterManager.PrimaryTerm);
                     jsonWriter.WriteBoolean("fenced", _dnsWebService._clusterManager.Fenced);
 
                     if (_dnsWebService._clusterManager.Fenced)
