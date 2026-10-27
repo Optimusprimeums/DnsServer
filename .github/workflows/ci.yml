@@ -66,6 +66,16 @@ jobs:
           path: DnsServer/DnsServerApp/bin/Release/publish/
           if-no-files-found: error
 
+      # The container runs as root, so everything it wrote to the runner's work folder is owned by root,
+      # and later non-container jobs in this repo (the Build workflow runs as the runner user) can't clean
+      # or check out over it. Hand it back to the runner user, read from the work folder's own owner.
+      - name: Give workspace back to the runner user
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
+          chown -R "$owner" "$RUNNER_TEMP" 2>/dev/null || true
+
   docker:
     name: Docker image (Linux, self-hosted)
     needs: linux
@@ -86,6 +96,14 @@ jobs:
       - name: Remove image
         if: always()
         run: docker image rm -f "technitium-dns-ci:${GITHUB_SHA::12}" || true
+
+      # same as the linux job: this container also runs as root and writes the checkout into the work folder
+      - name: Give workspace back to the runner user
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
+          chown -R "$owner" "$RUNNER_TEMP" 2>/dev/null || true
 
   windows:
     name: Windows installer (self-hosted)
