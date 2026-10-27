@@ -1,7 +1,7 @@
 # PR: DHCP failover (hot-standby) between two DNS servers
 
 **Branch:** `optimusprime-nn/DnsServer:upstream/dhcp-failover` → **`TechnitiumSoftware/DnsServer:develop`**
-**Commits:** 2 commits (the feature, then security hardening from a review), 15 files. Independent of the cluster improvements PR and the ACME PR (#2261); they merge cleanly in any order.
+**Commits:** 2 commits (the feature, then security hardening from a review), 15 files. Independent of the cluster improvements and ACME branches; they merge cleanly in any order.
 
 ---
 
@@ -17,6 +17,20 @@ Technitium's DHCP server has no redundancy. If the server running DHCP goes down
 It's off by default, and nothing changes for existing installs until it's enabled on both servers.
 
 The two servers can be paired **directly**, by the partner's web console URL plus an API token, so **no Cluster is required**. Small setups with two machines get redundant DHCP without setting up a Cluster. If both servers are already in a Cluster, they can be paired through it instead and use the Cluster's own API token.
+
+## Update: security hardening (second commit)
+
+After opening this PR I ran a security review of the change. It found one high and three medium issues, all in code this PR adds. The second commit fixes them. Each change and why:
+
+| Change | Why |
+|---|---|
+| `/api/dhcp/failover/set` now needs **Administration: Delete** as well as DhcpServer: Modify. | The failover settings hold an API token with administrator rights **on the partner**, and they decide which server hands out addresses. With only DhcpServer: Modify, a DHCP-only admin (for example the built-in DHCP Administrators group) could point the partner URL at their own server. The saved token was then sent there, giving them full admin on the partner. That's privilege escalation, so the setting now needs the same permission as the server-to-server endpoints. |
+| The saved partner token is only reused while the partner URL's scheme, host and port stay the same. Changing them requires entering the token again. | Defence in depth for the case above: a saved credential should never be sent to a server other than the one it was created for. |
+| Direct mode requires an **`https://`** partner URL. "Ignore Partner Certificate Errors" is replaced by an optional **pinned SHA-256 certificate fingerprint**. | Over plain HTTP, or with certificate checks off, anyone on the LAN who can intercept traffic (ARP spoofing) could read the administrator token, forge heartbeats to force or block a takeover, or inject a snapshot. Pinning keeps self-signed certificates usable without turning validation off: certificates that are trusted normally (for example from a public CA) still work, and otherwise only the pinned certificate is accepted. The page shows the fingerprint of an untrusted certificate the partner presented, so the admin can compare it and pin it. A config saved by the first commit that ignored certificate errors pins the certificate the partner presents next (trust on first use) instead of breaking. A saved plain-HTTP URL keeps working with a warning until the settings are saved again. `dhcp-failover.config` is now version 3. |
+| Scope names in a received snapshot are validated, and the scope count, each scope's length and the total snapshot size (64 MB) are checked. | Scope names become file names in the scopes folder (`Path.Combine(scopesFolder, name + ".scope")`). The stream constructor of `Scope` doesn't validate the name the way the API does, so a crafted snapshot from a rogue or impersonated partner could write files outside that folder. The length fields were also trusted, so a malformed snapshot could make the server allocate gigabytes. |
+| A Standby that took over (`PartnerDown`) stops serving when the Primary reports, with a valid status, that it is serving DHCP but isn't configured as this node's partner. Leases the Standby issued while serving are handed back to the Primary before it mirrors from it again. | Previously the Standby only stepped down when the Primary was working as its partner again. If the Primary came back with failover disabled or misconfigured, both servers handed out the same pool, causing duplicate addresses. Stepping down only on a well-formed status saying the Primary is serving avoids dropping service because of a transient HTTP error. The hand-back makes sure leases issued during the outage aren't lost after such a step-down. |
+
+`HttpApiClient` gains an optional `certificateValidationCallback` constructor parameter, used for the pinning. It's optional, so existing callers are unchanged.
 
 ## How it works
 
@@ -70,7 +84,7 @@ Settings are per server, stored in a new `dhcp-failover.config` file in the conf
 |---|---|---|
 | Enabled | off | |
 | Role | Primary | `Primary` / `Standby` |
-| Partner | — | **Direct**: web console URL, an API token created on the partner, and an "ignore certificate errors" option. **Cluster**: the partner's Cluster node name. |
+| Partner | — | **Direct**: the partner's HTTPS web console URL, an API token created on the partner, and optionally the SHA-256 fingerprint of its certificate if it is self-signed. **Cluster**: the partner's Cluster node name. |
 | Heartbeat interval | 5 s | |
 | Partner down delay | 30 s | Must be at least 2× the heartbeat interval |
 | Max client lead time | 1800 s | ≥ 60 s |
@@ -115,6 +129,8 @@ The server-to-server endpoints follow the existing cluster API's convention: an 
 - Pairing direct with Cluster: both modes use the same endpoints. Only how the partner is reached differs.
 
 ## Testing
+
+The security changes in the second commit build cleanly on `develop`, merge cleanly with the other branches, and were reviewed again after the fixes. The live tests below were run with the first commit.
 
 | What | Result |
 |---|---|
