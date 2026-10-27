@@ -77,6 +77,7 @@ namespace DnsServerCore.Acme
         #region variables
 
         const int MAX_BAD_NONCE_RETRIES = 3;
+        const int MAX_RESPONSE_SIZE = 1024 * 1024;
 
         readonly HttpClient _http;
         readonly Uri _directoryUrl;
@@ -97,6 +98,7 @@ namespace DnsServerCore.Acme
                 throw new ArgumentException("ACME account key must be an ECDSA P-256 key.", nameof(accountKey));
 
             _http = new HttpClient(handler, false);
+            _http.MaxResponseContentBufferSize = MAX_RESPONSE_SIZE; //ACME responses are small; don't let a CA make this server buffer large bodies
             _http.Timeout = TimeSpan.FromSeconds(60);
             _http.DefaultRequestHeaders.UserAgent.ParseAdd("TechnitiumDnsServer-ACME/1.0");
 
@@ -170,7 +172,26 @@ namespace DnsServerCore.Acme
             if (!_directory.TryGetProperty(name, out JsonElement value))
                 throw new AcmeException("ACME directory does not provide '" + name + "'.");
 
-            return value.GetString();
+            string url = value.GetString();
+            CheckCaUrl(url);
+
+            return url;
+        }
+
+        //every URL the CA hands out (directory entries, Location headers, authorizations, challenges, finalize, certificate)
+        //must stay on the directory's own https origin, so a CA or a modified directory can't make this server send requests elsewhere
+        private void CheckCaUrl(string url)
+        {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out Uri uri) || (uri.Scheme != Uri.UriSchemeHttps) || (Uri.Compare(uri, _directoryUrl, UriComponents.SchemeAndServer, UriFormat.Unescaped, StringComparison.OrdinalIgnoreCase) != 0))
+                throw new AcmeException("The ACME server returned a URL outside its own https://" + _directoryUrl.Authority + " address, which is not allowed: " + Truncate(url, 200));
+        }
+
+        private static string Truncate(string value, int maxLength)
+        {
+            if (value is null)
+                return null;
+
+            return value.Length <= maxLength ? value : value.Substring(0, maxLength) + "...";
         }
 
         private async Task<string> GetNonceAsync(CancellationToken cancellationToken)
@@ -212,6 +233,8 @@ namespace DnsServerCore.Acme
         {
             await LoadDirectoryAsync(cancellationToken);
 
+            CheckCaUrl(url);
+
             for (int attempt = 0; ; attempt++)
             {
                 string nonce = await GetNonceAsync(cancellationToken);
@@ -242,7 +265,7 @@ namespace DnsServerCore.Acme
                 }
 
                 string problemType = null;
-                string detail = body;
+                string detail = "the server's response wasn't an ACME error document"; //never echo arbitrary response bodies into the log
 
                 try
                 {
@@ -252,7 +275,7 @@ namespace DnsServerCore.Acme
                         problemType = type.GetString();
 
                     if (problem.TryGetProperty("detail", out JsonElement detailElement))
-                        detail = detailElement.GetString();
+                        detail = Truncate(detailElement.GetString(), 500);
                 }
                 catch (JsonException)
                 { }
@@ -263,7 +286,7 @@ namespace DnsServerCore.Acme
                 if ((problemType == "urn:ietf:params:acme:error:badNonce") && (attempt < MAX_BAD_NONCE_RETRIES))
                     continue;
 
-                throw new AcmeException("ACME request failed (" + (int)response.StatusCode + " " + problemType + "): " + detail, problemType);
+                throw new AcmeException("ACME request failed (" + (int)response.StatusCode + " " + Truncate(problemType, 100) + "): " + detail, problemType);
             }
         }
 
