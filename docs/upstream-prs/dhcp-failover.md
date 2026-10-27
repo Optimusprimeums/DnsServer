@@ -1,7 +1,7 @@
 # PR: DHCP failover (hot-standby) between two DNS servers
 
 **Branch:** `optimusprime-nn/DnsServer:upstream/dhcp-failover` → **`TechnitiumSoftware/DnsServer:develop`**
-**Commit:** single commit, 14 files, +2135 / −6. Independent of the cluster improvements PR; the two merge cleanly in either order.
+**Commit:** single commit, 14 files, +2135 / −6. Independent of the cluster improvements PR and the ACME PR (#2261); they merge cleanly in any order.
 
 ---
 
@@ -120,7 +120,7 @@ The server-to-server endpoints follow the existing cluster API's convention: an 
 | Merges cleanly with the cluster improvements PR in either order; combined build | ✔ |
 | Running on a live two-server network (with ACME and the cluster changes), serving real clients | ✔ |
 | Live failover with real DHCP clients on two servers: normal replication; stop Primary → Standby serves after the delay; restart Primary → leases merged and handed back; split brain (traffic blocked between the servers only); Standby restart | ✔ |
-| Live: invalid token (the Standby must treat the Primary as alive and not start serving) | ☐ Not yet tested |
+| Live: invalid token (the Standby treats the Primary as alive and doesn't start serving) | ✔ |
 
 > Fill in the last row with your own results before submitting. Reviewers will ask.
 

@@ -269,7 +269,7 @@ Push builds are never cancelled mid-release (`cancel-in-progress` is on for PRs 
 - ✔ The installer download and verify lines were run against the live release.
 - ✔ ACME end-to-end against Pebble (three providers/paths, HTTPS verified) passes in CI on every push to `fork/main`.
 - ✔ **Running on two real servers** (ns1/ns2) with DHCP failover on and real clients.
-- ✔ **DHCP failover tested live** on ns1/ns2: stop Primary, hand back, split brain, Standby restart. Invalid token not yet tested live.
+- ✔ **DHCP failover tested live** on ns1/ns2: stop Primary, hand back, split brain, Standby restart. and invalid token.
 - ☐ **Cluster scenarios not yet exercised live** (witness promotion, pause, missed notify). See the test plan in the cluster PR description.
 - ✔ **ACME verified against a real CA:** Let's Encrypt with Cloudflare DNS-01; certificates issued on ns1 and ns2.
 
