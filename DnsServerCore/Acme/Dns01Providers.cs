@@ -81,6 +81,11 @@ namespace DnsServerCore.Acme
 
         public Task AddTxtRecordAsync(string recordName, string value, CancellationToken cancellationToken)
         {
+            //a delegated challenge name comes from unauthenticated DNS answers; never let it steer a write into this server's zones
+            //anywhere but a challenge name, such as a zone apex
+            if (!recordName.StartsWith("_acme-challenge.", StringComparison.OrdinalIgnoreCase))
+                throw new AcmeException("The challenge name " + recordName + " doesn't start with '_acme-challenge.', so it won't be written into a zone on this server. When delegating with a CNAME to a zone on this server, point it at a name starting with '_acme-challenge.'.");
+
             AuthZoneInfo zoneInfo = GetPrimaryZone(recordName);
 
             _dnsServer.AuthZoneManager.AddRecord(zoneInfo.Name, new DnsResourceRecord(recordName, DnsResourceRecordType.TXT, DnsClass.IN, TXT_TTL, new DnsTXTRecordData(value)));

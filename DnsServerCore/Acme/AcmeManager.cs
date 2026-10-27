@@ -636,8 +636,12 @@ namespace DnsServerCore.Acme
             }
             catch (Exception ex)
             {
-                _lastError = ex is AcmeException ? ex.Message : ex.ToString();
+                //the status and log are shown to Settings View users: no stack traces there, the full exception goes to the server log
+                _lastError = ex.Message;
                 Log("Failed: " + _lastError);
+
+                if (ex is not AcmeException)
+                    _dnsWebService.LogManager.Write("ACME certificate request failed.", ex);
             }
             finally
             {

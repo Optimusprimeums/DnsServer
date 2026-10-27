@@ -44,7 +44,7 @@ If a renewal fails, it's retried at the next check, and the error is shown on th
 
 ### Zone on this DNS server
 
-Use this when this server hosts the domain's zone as a **Primary zone** and is the zone's public name server, or feeds the public name servers by zone transfer. No credentials are needed.
+Use this when this server hosts the domain's zone as a **Primary zone** and is the zone's public name server, or feeds the public name servers by zone transfer. No credentials are needed. Because it writes into this server's zones, configuring or running it needs **Zones: Modify** permission in addition to Settings: Modify.
 
 On a **Cluster secondary node** the zone is a Secondary zone and can't be written. Use **RFC 2136** there, pointed at the Primary node.
 
@@ -66,7 +66,7 @@ Use this when the domain's public DNS is at Cloudflare. Create an API token in t
 If the domain is hosted somewhere without a supported provider, or you don't want API credentials for the whole zone on this server, you can point just the challenge name at a zone this server controls:
 
 1. Host a small zone on this server that is publicly reachable, for example `acme.example.com`, delegated with NS records from the parent zone.
-2. At the domain's DNS host, create the CNAME `_acme-challenge.dns1.example.com` → `_acme-challenge.dns1.example.com.acme.example.com` (any name inside the delegated zone works).
+2. At the domain's DNS host, create the CNAME `_acme-challenge.dns1.example.com` → `_acme-challenge.dns1.example.com.acme.example.com` (with **Zone on this DNS server**, the target must start with `_acme-challenge.`; other names are refused, so a spoofed CNAME can't make the server write into its zones elsewhere).
 3. Select **Zone on this DNS server**.
 
 The server follows the CNAME and publishes the TXT record at the target. Certificate authorities follow CNAMEs during validation (RFC 8555 section 8.4).
@@ -113,7 +113,7 @@ Protect the config folder as you would the rest of the server's configuration.
 | Endpoint | Permission | Purpose |
 |---|---|---|
 | `/api/settings/acme/get` | Settings: View | Settings (secrets reported only as set or not set), status, current certificate, log |
-| `/api/settings/acme/set` | Settings: Modify | `enabled`, `directoryUrl`, `termsOfServiceAgreed`, `email`, `eabKeyId`, `eabHmacKey`, `domains` (comma separated), `keyType` (`EcdsaP256`/`Rsa2048`), `useForWebService`, `useForDnsTls`, `dns01Provider` (`LocalZone`/`Rfc2136`/`Cloudflare`), `rfc2136Server`, `rfc2136TsigKeyName`, `cloudflareApiToken`, `renewDaysBeforeExpiry`, `propagationTimeoutSeconds`, `publicResolvers`. Empty secret parameters keep the saved values. |
+| `/api/settings/acme/set` | Settings: Modify (plus Zones: Modify for the local zone provider; also for `request` and `testDns01`) | `enabled`, `directoryUrl`, `termsOfServiceAgreed`, `email`, `eabKeyId`, `eabHmacKey`, `domains` (comma separated), `keyType` (`EcdsaP256`/`Rsa2048`), `useForWebService`, `useForDnsTls`, `dns01Provider` (`LocalZone`/`Rfc2136`/`Cloudflare`), `rfc2136Server`, `rfc2136TsigKeyName`, `cloudflareApiToken`, `renewDaysBeforeExpiry`, `propagationTimeoutSeconds`, `publicResolvers`. Empty secret parameters keep the saved values. |
 | `/api/settings/acme/directoryInfo?directoryUrl=` | Settings: View | The CA's terms of service URL, and whether EAB is required |
 | `/api/settings/acme/request` | Settings: Modify | Start issuing or renewing now (runs in the background; poll `get`) |
 | `/api/settings/acme/testDns01` | Settings: Modify | Publish, verify and remove a test TXT record |
@@ -124,7 +124,7 @@ All endpoints accept `node=` to target a specific Cluster node.
 ## Limitations
 
 - **Backups don't include ACME.** Settings backups don't include `config/acme/`. After restoring a backup, set up ACME again; a new certificate is requested on the next check.
-- **The local-zone provider can write to any Primary zone.** Any user with Settings: Modify permission can make it publish challenge TXT records in any Primary zone on this server, regardless of per-zone permissions. Settings: Modify is effectively administrator access already.
+- **The local-zone provider checks section-level Zones: Modify, not per-zone permissions.** A user with Settings: Modify and Zones: Modify can make it publish challenge TXT records (only at `_acme-challenge.` names) in any Primary zone on this server.
 - **Settings are refused while a request is running.** Saving settings is refused until the run finishes, so the order and the certificate request always use the same names.
 
 ## Adding a DNS-01 provider

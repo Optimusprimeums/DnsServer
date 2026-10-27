@@ -62,6 +62,18 @@ namespace DnsServerCore
                     throw new DnsWebServiceException("Access was denied.");
             }
 
+            //the local zone provider writes TXT records into zones hosted on this server, so it also needs permission to modify zones
+            private void CheckZonePermission(HttpContext context, Dns01ProviderType providerType)
+            {
+                if (providerType != Dns01ProviderType.LocalZone)
+                    return;
+
+                User sessionUser = _dnsWebService.GetSessionUser(context);
+
+                if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, sessionUser, PermissionFlag.Modify))
+                    throw new DnsWebServiceException("Access was denied. The 'Zone on this DNS server' provider writes records into this server's zones, so it requires Zones Modify permission as well.");
+            }
+
             private void WriteAcme(Utf8JsonWriter jsonWriter)
             {
                 AcmeManager acme = _dnsWebService._acmeManager;
@@ -193,6 +205,7 @@ namespace DnsServerCore
                 bool useForDnsTls = request.GetQueryOrForm("useForDnsTls", bool.Parse, acme.UseForDnsTls);
 
                 Dns01ProviderType providerType = request.GetQueryOrFormEnum("dns01Provider", acme.ProviderType);
+                CheckZonePermission(context, providerType);
                 string rfc2136Server = request.QueryOrForm("rfc2136Server");
                 string rfc2136TsigKeyName = request.QueryOrForm("rfc2136TsigKeyName");
                 string cloudflareApiToken = request.QueryOrForm("cloudflareApiToken");
@@ -261,6 +274,7 @@ namespace DnsServerCore
                 CheckPermission(context, PermissionFlag.Modify);
 
                 AcmeManager acme = _dnsWebService._acmeManager;
+                CheckZonePermission(context, acme.ProviderType);
 
                 if (!acme.Enabled)
                     throw new DnsWebServiceException("Enable ACME and save the settings first.");
@@ -292,6 +306,7 @@ namespace DnsServerCore
             public async Task TestDns01Async(HttpContext context)
             {
                 CheckPermission(context, PermissionFlag.Modify);
+                CheckZonePermission(context, _dnsWebService._acmeManager.ProviderType);
 
                 string result;
 
